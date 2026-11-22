@@ -6,7 +6,27 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 
 /* Fake router: the "fastest route" is a straight line between whatever points it is given. */
-function fakeServices({ osrm } = {}) {
+/* Google's polyline format at 6 decimal places, which is what Valhalla answers with. */
+function enc6(pts) {
+  let out = '', pl = 0, pn = 0;
+  const enc = v => { v = v < 0 ? ~(v << 1) : v << 1; let s = ''; while (v >= 0x20) { s += String.fromCharCode((0x20 | (v & 0x1f)) + 63); v >>= 5; } return s + String.fromCharCode(v + 63); };
+  for (const [la, lo] of pts) { const a = Math.round(la * 1e6), b = Math.round(lo * 1e6); out += enc(a - pl) + enc(b - pn); pl = a; pn = b; }
+  return out;
+}
+const valhallaPts = u => JSON.parse(new URL(u).searchParams.get('json')).locations.map(l => [l.lat, l.lon]);
+const valhallaAnswer = (route, pts) => json(route, { trip: { legs: [{ shape: enc6(pts) }], summary: { length: 1, time: 100 } } });
+/* A second engine with different taste: on any leg longer than about 700 m it swings out onto "another road". */
+function bulgingValhalla(route, u) {
+  const pts = valhallaPts(u), out = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i], m = Math.hypot((b[0] - a[0]) * 110540, (b[1] - a[1]) * 81400);
+    if (m > 700) out.push([(a[0] + b[0]) / 2 + 0.0015, (a[1] + b[1]) / 2]);
+    out.push(b);
+  }
+  return valhallaAnswer(route, out);
+}
+
+function fakeServices({ osrm, valhalla } = {}) {
   return route => {
     const u = route.request().url();
     if (u.includes('tile.openstreetmap.org')) return route.fulfill({ body: PNG, contentType: 'image/png' });
@@ -15,7 +35,7 @@ function fakeServices({ osrm } = {}) {
       const pts = u.split('/driving/')[1].split('?')[0].split(';').map(s => s.split(',').map(Number));
       return json(route, { code: 'Ok', routes: [{ distance: 1000, duration: 100, geometry: { coordinates: pts }, legs: [{ steps: [{ intersections: [] }] }] }] });
     }
-    if (u.includes('valhalla')) return json(route, { error: 'No route' }, 400);
+    if (u.includes('valhalla')) return valhalla ? valhalla(route, u) : valhallaAnswer(route, valhallaPts(u)); // by default the second engine agrees with the first
     if (u.includes('nominatim')) return json(route, [{ display_name: 'Frame Park, Waukesha, Wisconsin, USA', lat: '43.018', lon: '-88.224' }]);
     return route.abort();
   };
@@ -73,6 +93,47 @@ module.exports = async function offline(browser, url) {
     t.check(r.score >= 0.97, `bent route match only ${Math.round(r.score * 100)}%`);
     t.check(r.google[0].includes('waypoints=') && r.apple[0].includes('waypoint='), 'links are missing the stop');
     await page.screenshot({ path: path.join(OUT, 'offline-result.png') });
+    await ctx.close();
+  });
+
+  await S.test('Second engine disagrees: extra stops are added until both engines follow the route', async t => {
+    const one = await openApp(browser, url, { mock: fakeServices({ valhalla: bulgingValhalla }), double: false });
+    await drawRoute(one.page, [A, B]);
+    const r1 = await buildLinks(one.page);
+    t.check(r1.stops.length === 0 && r1.checked === 'one', `with the double-check off expected 0 stops, got ${r1.stops.length}`);
+    await one.ctx.close();
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ valhalla: bulgingValhalla }) });
+    await drawRoute(page, [A, B]);
+    const r = await buildLinks(page);
+    t.note(`${r.stops.length} stops; first engine ${Math.round(r.score * 100)}%, second ${Math.round(r.score2 * 100)}%`);
+    t.check(r.checked === 'two', 'second engine was not consulted');
+    t.check(r.stops.length >= 1 && r.stops.length <= 6, `expected 1-6 stops, got ${r.stops.length}`);
+    t.check(r.score >= 0.97 && r.score2 >= 0.97, 'stops did not bring both engines onto the route');
+    t.check((await page.textContent('#sheet')).includes('two different routing engines'), 'result does not say it was double-checked');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Second engine unavailable: links are still made and the user is told', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ valhalla: route => route.abort() }) });
+    await drawRoute(page, [A, MID, B]);
+    const r = await buildLinks(page);
+    t.check(r && r.checked === 'failed', 'expected a result marked as single-engine');
+    t.check(r.stops.length >= 1 && r.score >= 0.97, 'single-engine fallback did not produce a good result');
+    t.check((await page.textContent('#sheet')).includes('one engine only'), 'result does not mention the missing double-check');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Double-check can be switched off in Options and the choice is remembered', async t => {
+    const { ctx, page } = await openApp(browser, url, { mock: fakeServices({ valhalla: bulgingValhalla }) });
+    await drawRoute(page, [A, B]);
+    await buildLinks(page);
+    await page.click('details.opts summary'); await page.uncheck('#t-double');
+    await page.waitForFunction(() => window.DMR.S.mode === 'result' && window.DMR.S.result.checked === 'one', null, { timeout: 15000 });
+    t.check(await page.evaluate(() => window.DMR.S.result.stops.length) === 0, 'stops remained after switching the double-check off');
+    await page.reload(); await page.waitForFunction(() => window.DMR);
+    t.check(await page.evaluate(() => window.DMR.S.double) === false, 'choice was not remembered after reload');
     await ctx.close();
   });
 

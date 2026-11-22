@@ -85,9 +85,9 @@ async function osrmRoute(pts){
 let lastV=0;
 function dec6(s){const pts=[];let i=0,la=0,lo=0;const d=()=>{let r=0,sh=0,b;do{b=s.charCodeAt(i++)-63;r|=(b&0x1f)<<sh;sh+=5}while(b>=0x20);return r&1?~(r>>1):r>>1};
   while(i<s.length){la+=d();lo+=d();pts.push([la/1e6,lo/1e6])}return pts}
-async function valhallaRoute(pts){
+async function valhallaRoute(pts,avoid=true){
   const wait=lastV+1100-Date.now();if(wait>0)await sleep(wait);lastV=Date.now();
-  const q={locations:pts.map(p=>({lat:+p[0].toFixed(6),lon:+p[1].toFixed(6),type:'break'})),costing:'auto',costing_options:{auto:{use_highways:0}},directions_options:{units:'kilometers'}};
+  const q={locations:pts.map(p=>({lat:+p[0].toFixed(6),lon:+p[1].toFixed(6),type:'break'})),costing:'auto',...(avoid?{costing_options:{auto:{use_highways:0}}}:{}),directions_options:{units:'kilometers'}};
   const j=await getJSON('https://valhalla1.openstreetmap.de/route?json='+encodeURIComponent(JSON.stringify(q)));
   if(!j.trip)throw new Error(j.error||'No route found');
   let coords=[];j.trip.legs.forEach(l=>{const c=dec6(l.shape);coords=coords.length?coords.concat(c.slice(1)):c});
@@ -158,26 +158,37 @@ const route = DEMO ? makeLocalRouter(DEMO.graph) : (pts,opt)=>opt&&opt.avoid?val
 
 /* ---------------- The fake-stop finder ---------------- */
 /* Simulates "fastest route through these stops" and adds a stop wherever that route leaves yours,
-   until it follows your route the whole way. */
+   until it follows your route the whole way.
+   With opts.second (a second, independent router) the stops must hold your route in BOTH routers:
+   Google and Apple each make their own choices, so stops that only convince one router are fragile. */
 async function findStops(desiredLL, opts, onProgress){
   setRef(desiredLL[0]);
   const D=resample(desiredLL.map(P),10),Dix=indexLine(D.pts);
   const origin=desiredLL[0],dest=desiredLL[desiredLL.length-1];
-  const stops=[];let cand,C,score=0,iter=0,hits=[];const maxIter=opts.maxStops*2+10;
+  const stops=[];let iter=0;const maxIter=opts.maxStops*2+10;
   const ZR=opts.zoneR||40;
   const allZ=(opts.zones||[]).map(z=>({ll:z,p:P(z)}));
   const blocked=allZ.filter(z=>distToLine(Dix,z.p)<=ZR);          // spots on your own route can't be avoided
   const Z=allZ.filter(z=>!blocked.includes(z));
   const avoidOnly=Z.length>0&&!opts.strict;
-  const evaluate=async()=>{
-    cand=await route([origin,...stops.map(s=>s.ll),dest],{avoid:opts.avoid});
-    C=resample(cand.coords.map(P),10);const Cix=indexLine(C.pts);
+  const routers=[{fn:pts=>route(pts,{avoid:opts.avoid}),min:0.995,second:false}];
+  if(opts.second)routers.push({fn:opts.second,min:0.97,second:true});
+  let secondFailed=false,dirty=true;
+  const evaluate=async R=>{
+    const cand=await R.fn([origin,...stops.map(s=>s.ll),dest]);
+    const C=resample(cand.coords.map(P),10),Cix=indexLine(C.pts);
     const dOn=D.pts.map(p=>distToLine(Cix,p)<=TOL),cOn=C.pts.map(p=>distToLine(Dix,p)<=TOL);
     const frac=a=>a.filter(Boolean).length/a.length;
-    score=Math.min(frac(dOn),frac(cOn));
-    hits=[];C.pts.forEach((p,j)=>{for(const z of Z)if(hyp(p,z.p)<=ZR){hits.push(j);break}});
-    return {dOn,cOn};
+    const score=Math.min(frac(dOn),frac(cOn));
+    const hits=[];C.pts.forEach((p,j)=>{for(const z of Z)if(hyp(p,z.p)<=ZR){hits.push(j);break}});
+    return {R,cand,C,dOn,cOn,score,hits,ok:avoidOnly?hits.length===0:score>=R.min};
   };
+  /* Ask each router in turn. If the second router is unreachable, carry on with the first one alone. */
+  const evalAll=async stopAtFirstBad=>{const out=[];
+    for(const R of routers.slice()){let e;
+      try{e=await evaluate(R)}catch(err){if(!R.second)throw err;routers.splice(routers.indexOf(R),1);secondFailed=true;continue}
+      out.push(e);if(stopAtFirstBad&&!e.ok)break}
+    dirty=false;return out};
   const stretches=(on,along,minLen)=>{const out=[];let i=0;while(i<on.length){if(on[i]){i++;continue}let j=i;while(j<on.length&&!on[j])j++;
     if(along[j-1]-along[i]+10>=minLen)out.push([i,j-1]);i=j}return out};
   const placeIn=(i0,i1)=>{ // candidate positions inside a stretch of YOUR route, best first
@@ -187,13 +198,17 @@ async function findStops(desiredLL, opts, onProgress){
     if(!c.length)c.push({i:Math.round((i0+i1)/2),s:0});
     return c.sort((x,y)=>y.s-x.s).map(x=>x.i);
   };
-  const addStop=(i0,i1)=>{const cands=placeIn(i0,i1),i=cands[0];
+  const addStop=(i0,i1)=>{const cands=placeIn(i0,i1),i=cands[0];dirty=true;
     stops.push({i,ll:U(D.pts[i]),along:D.along[i],cands,k:0});stops.sort((a,b)=>a.along-b.along)};
+  let E=[],phase2=false;
   while(iter++<maxIter){
-    onProgress&&onProgress(stops.length);
-    const {dOn,cOn}=await evaluate();
-    if(avoidOnly?hits.length===0:score>=0.995)break;
+    onProgress&&onProgress(stops.length,phase2);
+    E=await evalAll(true);
+    const ev=E.find(e=>!e.ok);
+    if(!ev)break;
+    phase2=ev.R.second;
     if(stops.length>=opts.maxStops)break;
+    const {dOn,cOn,C,hits}=ev;
     const near=p=>{let b=0,bd=Infinity;D.pts.forEach((q,i)=>{const d=hyp(p,q);if(d<bd){bd=d;b=i}});return b};
     if(avoidOnly){
       // Only fix the place where the predicted route runs into a spot you marked.
@@ -201,8 +216,11 @@ async function findStops(desiredLL, opts, onProgress){
       let ia=near(C.pts[Math.max(0,j0-1)]),ib=near(C.pts[Math.min(C.pts.length-1,j1+1)]);if(ia>ib)[ia,ib]=[ib,ia];
       if(D.along[ib]-D.along[ia]>40){addStop(ia,ib);continue}
     }
-    const gaps=stretches(dOn,D.along,20);
+    let gaps=stretches(dOn,D.along,ev.R.second?40:20);
+    // A stretch the second router still misses even with a stop in it is a mapping difference a stop can't fix: leave it.
+    if(ev.R.second)gaps=gaps.filter(([a,b])=>!stops.some(st=>st.i>=a&&st.i<=b));
     if(gaps.length&&!avoidOnly){addStop(gaps[0][0],gaps[0][1]);continue}
+    if(ev.R.second)break;                                            // don't reshuffle stops the first router is happy with
     // Your route is covered, but the simulated one makes an extra detour (often a U-turn around a stop).
     const det=stretches(cOn,C.along,20);if(!det.length)break;
     const [j0,j1]=det[0],pa=C.pts[Math.max(0,j0-1)],pb=C.pts[Math.min(C.pts.length-1,j1+1)];
@@ -211,17 +229,21 @@ async function findStops(desiredLL, opts, onProgress){
     // A spur: move the stop closest to it to its next-best spot, or drop it.
     let s=null,sd=Infinity;for(const st of stops){for(let j=j0;j<=j1;j++){const d=hyp(D.pts[st.i],C.pts[j]);if(d<sd){sd=d;s=st}}}
     if(!s)break;
+    dirty=true;
     s.k++;if(s.k<Math.min(s.cands.length,6)){s.i=s.cands[s.k];s.ll=U(D.pts[s.i]);s.along=D.along[s.i]}else stops.splice(stops.indexOf(s),1);
   }
   // Optional safety stops: break up long stretches where Google or Apple might pick a different road than OSM routing does.
-  if(opts.safety&&!avoidOnly&&score>=0.95){let added=0;
+  if(opts.safety&&!avoidOnly&&E.length&&E[0].score>=0.95){let added=0;
     while(stops.length<opts.maxStops&&added<4){const anchors=[0,...stops.map(s=>s.along),D.len];let gi=-1,gl=0;
       for(let i=1;i<anchors.length;i++){const g=anchors[i]-anchors[i-1];if(g>gl){gl=g;gi=i}}
       if(gl<2000)break;const m=(anchors[gi-1]+anchors[gi])/2;let i0=D.along.findIndex(a=>a>=m-250),i1=D.along.findIndex(a=>a>=m+250);if(i1<0)i1=D.pts.length-1;
-      addStop(i0,i1);added++}
-    if(added)await evaluate()}
-  return {origin,dest,stops:stops.map(s=>s.ll),cand,score,length:D.len,avoidOnly,avoid:!!opts.avoid,zones:Z.length,blocked:blocked.length,
-    crossed:Z.filter(z=>C.pts.some(p=>hyp(p,z.p)<=ZR)).length};
+      addStop(i0,i1);added++}}
+  if(dirty||E.length<routers.length){onProgress&&onProgress(stops.length,routers.length>1);E=await evalAll(false)}
+  const first=E.find(e=>!e.R.second),sec=E.find(e=>e.R.second)||null;
+  const crossedBy=e=>Z.filter(z=>e.C.pts.some(p=>hyp(p,z.p)<=ZR)).length;
+  return {origin,dest,stops:stops.map(s=>s.ll),cand:first.cand,cand2:sec?sec.cand:null,score:first.score,score2:sec?sec.score:null,
+    match:sec?Math.min(first.score,sec.score):first.score,checked:sec?'two':secondFailed?'failed':'one',
+    length:D.len,avoidOnly,avoid:!!opts.avoid,zones:Z.length,blocked:blocked.length,crossed:Math.max(...E.map(crossedBy))};
 }
 
 /* ---------------- Links ---------------- */
@@ -263,7 +285,7 @@ if(DEMO){
 }
 
 /* ---------------- State ---------------- */
-const S={mode:'draw',pts:[],snap:true,desired:null,markers:[],line:null,busy:0,result:null,resLayers:[],safety:load('wps.safety2',false),tool:'route',zones:[],zoneLayers:[],strict:false,fromHere:load('wps.fromHere',false),name:''};
+const S={mode:'draw',pts:[],snap:true,desired:null,markers:[],line:null,busy:0,result:null,resLayers:[],safety:load('wps.safety2',false),double:load('dmr.double',true),tool:'route',zones:[],zoneLayers:[],strict:false,fromHere:load('wps.fromHere',false),name:''};
 const sheet=$('sheet');
 
 function pinIcon(label,cls){return L.divIcon({className:'',html:`<div class="pin ${cls}">${label}</div>`,iconSize:[26,26],iconAnchor:[13,13]})}
@@ -318,13 +340,14 @@ async function build(){
   if(!S.desired)return;
   S.mode='working';render();
   try{
-    const base={maxStops:40,safety:S.safety,zones:S.zones,zoneR:ZONE_R,strict:S.strict};
-    const prog=pre=>n=>{const el=$('prog');if(el)el.textContent=pre+(n?`testing with ${n} stop${n>1?'s':''}…`:'testing the fastest route…')};
+    const second=!DEMO&&S.double?pts=>valhallaRoute(pts,false):null;        // second opinion: a different routing engine, normal driving settings
+    const base={maxStops:40,safety:S.safety,zones:S.zones,zoneR:ZONE_R,strict:S.strict,second};
+    const prog=pre=>(n,two)=>{const el=$('prog');if(el)el.textContent=two?`Double-checking with a second routing engine (${n} stop${n===1?'':'s'} so far)…`:pre+(n?`testing with ${n} stop${n>1?'s':''}…`:'testing the fastest route…')};
     const res=await findStops(S.desired.coords,base,prog('Google and Apple: '));
-    const ok=r=>r.avoidOnly?r.crossed===0:r.score>=0.97;
+    const ok=r=>r.avoidOnly?r.crossed===0:r.match>=0.97;
     let pick=res;
-    if(res.stops.length>0&&S.desired.hwy===false){
-      try{const av=await findStops(S.desired.coords,{...base,avoid:true,safety:false,maxStops:Math.max(0,res.stops.length-1)},prog('With Avoid highways: '));
+    if(!second&&res.stops.length>0&&S.desired.hwy===false){
+      try{const av=await findStops(S.desired.coords,{...base,second:null,avoid:true,safety:false,maxStops:Math.max(0,res.stops.length-1)},prog('With Avoid highways: '));
         if(ok(av)&&(av.stops.length<res.stops.length||!ok(res)))pick=av;}
       catch(e){/* keep the regular plan */}
     }
@@ -352,7 +375,7 @@ async function copyText(text,btn){
 function flash(btn,t){if(!btn)return;const o=btn.textContent;btn.textContent=t;setTimeout(()=>btn.textContent=o,1600)}
 function shareLink(){
   const r=S.result;const simp=simplify(S.desired.coords.map(P),6).map(U);
-  const data={v:1,n:S.name||'',o:r.origin.map(x=>+x.toFixed(6)),d:r.dest.map(x=>+x.toFixed(6)),s:r.stops.map(s=>s.map(x=>+x.toFixed(6))),z:S.zones.map(s=>s.map(x=>+x.toFixed(5))),...(r.avoid?{aa:1}:{}),p:encPoly(simp),m:+r.score.toFixed(3)};
+  const data={v:1,n:S.name||'',o:r.origin.map(x=>+x.toFixed(6)),d:r.dest.map(x=>+x.toFixed(6)),s:r.stops.map(s=>s.map(x=>+x.toFixed(6))),z:S.zones.map(s=>s.map(x=>+x.toFixed(5))),...(r.avoid?{aa:1}:{}),p:encPoly(simp),m:+r.match.toFixed(3)};
   return location.href.split('#')[0]+'#r='+b64u.enc(JSON.stringify(data));
 }
 
@@ -418,14 +441,15 @@ function render(){
     sheet.innerHTML=`<h2>Finding your stops</h2><p class="sub" id="prog">Testing the fastest route…</p><p class="hint">Draw My Route checks the route Google and Apple would most likely pick, and adds a stop wherever it would leave your path.</p>`;
   }
   else if(m==='result'){
-    const r=S.result,parts=splitParts(r.origin,r.dest,r.stops),pct=Math.round(r.score*100),ns=r.stops.length,sn=`${ns} stop${ns===1?'':'s'}`;
-    const good=r.avoidOnly?r.crossed===0:r.score>=0.97,nzs=r.zones===1?'road you marked':`${r.zones} roads you marked`;
+    const r=S.result,parts=splitParts(r.origin,r.dest,r.stops),pct=Math.floor(r.match*100),ns=r.stops.length,sn=`${ns} stop${ns===1?'':'s'}`;
+    const good=r.avoidOnly?r.crossed===0:r.match>=0.97,nzs=r.zones===1?'road you marked':`${r.zones} roads you marked`;
     sheet.innerHTML=`<h2>${r.avoidOnly?(ns?`${sn} keep${ns===1?'s':''} them off the ${nzs}`:`No stops needed`):(ns?`${sn} keep${ns===1?'s':''} them on your route`:'No stops needed')}</h2>
       <p class="sub">${r.avoidOnly?(ns?'Everywhere else, Google and Apple are free to pick their own roads.':'The fastest route already stays off those roads, so the links just go from A to B.')
         :(ns?'Google Maps and Apple Maps will route through these points in order, which keeps them on your path.':'The fastest route already follows your path, so the links just go from A to B.')}</p>
       ${r.avoidOnly?`<div class="match ${good?'good':'warn'}">${good?`<b>✓</b> Predicted to stay off ${r.zones===1?'the':'all'} ${nzs}`:`<b>${r.crossed}</b> marked spot${r.crossed===1?' is':'s are'} still on the predicted route. Draw your route around ${r.crossed===1?'it':'them'}.`}</div>`
         :`<div class="match ${good?'good':'warn'}"><b>${pct}%</b> predicted match with your route${good?'':'. Try moving one of your points onto a main road, or add a point where the dashed line strays.'}</div>`}
       <div class="legend"><span><i></i>Your drawing</span><span><i class="pred"></i>Predicted drive in Google/Apple</span>${r.zones?'<span><i class="x"></i>Stay off</span>':''}</div>
+      ${r.checked==='two'?'<p class="hint">Checked against two different routing engines.</p>':r.checked==='failed'?'<p class="hint">The second routing engine was unavailable, so this was checked with one engine only.</p>':''}
       ${r.blocked?`<p class="hint">${r.blocked} ✕ ${r.blocked===1?'is':'are'} on your own route, so ${r.blocked===1?'it was':'they were'} ignored.</p>`:''}
       ${parts.length>1?`<p class="hint" style="margin:0 0 8px">Your route needs more than ${PART_MAX} stops, so it's split into ${parts.length} parts. Open part 2 when you reach the end of part 1 (⇥).</p>`:''}
       ${linkBlocks(r)}
@@ -434,6 +458,7 @@ function render(){
       <details class="opts"><summary>Options</summary>
         ${S.zones.length?`<label class="toggle"><input type="checkbox" id="t-strict" ${S.strict?'checked':''}> Follow my whole drawn route exactly (more stops)</label>`:''}
         <label class="toggle"><input type="checkbox" id="t-here" ${S.fromHere?'checked':''}> Start from the driver's current location (your start becomes the first stop)</label>
+        ${DEMO?'':`<label class="toggle"><input type="checkbox" id="t-double" ${S.double?'checked':''}> Double-check with a second routing engine (more reliable, slower, may add stops)</label>`}
         ${r.avoidOnly?'':`<label class="toggle"><input type="checkbox" id="t-safe" ${S.safety?'checked':''}> Add backup stops on long stretches (more reliable, more announcements)</label>`}
       </details>
       <p class="hint">${ns?`Google and Apple treat each in-between point as a stop and will announce it. Just keep driving; if the app pauses, tap Continue or Resume. `:''}Apple Maps links need iOS 18.4 or later. Phone browsers without the Google Maps app only show the first 3 stops.</p>
@@ -443,6 +468,7 @@ function render(){
       if(navigator.share){try{await navigator.share({title:'My route',text:'Open this route in Google Maps or Apple Maps',url:link});return}catch(err){if(err.name==='AbortError')return}}
       copyText(link,e.currentTarget)};
     $('t-here').onchange=e=>{S.fromHere=e.target.checked;store('wps.fromHere',S.fromHere);render()};
+    if($('t-double'))$('t-double').onchange=e=>{S.double=e.target.checked;store('dmr.double',S.double);build()};
     if($('t-safe'))$('t-safe').onchange=e=>{S.safety=e.target.checked;store('wps.safety2',S.safety);build()};
     if($('t-strict'))$('t-strict').onchange=e=>{S.strict=e.target.checked;build()};
     $('b-edit').onclick=editRoute;

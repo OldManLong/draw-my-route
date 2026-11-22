@@ -1,11 +1,12 @@
 // Live tests: real OpenStreetMap tiles, routing and search. Slower, and they need internet access.
 // Each scenario draws a route the way a person would, makes the share links, then checks the result three ways:
-//   1. the app's own predicted match,
-//   2. an independent re-measurement of that match (separate code, so it catches scoring mistakes),
-//   3. a "second opinion": a different router (Valhalla) is given the same stops. If it also follows the
-//      drawn route, the stops are likely to hold up in maps apps that do not think like the app's router.
+//   1. the app's own predicted match in each of its two routing engines (OSRM and Valhalla),
+//   2. an independent re-measurement of those matches (separate code, so it catches scoring mistakes),
+//   3. an outside judge: BRouter, an engine the app never uses, is given the same stops. If it also follows
+//      the drawn route, the stops are likely to hold up in maps apps that think differently from the app.
+// Each scenario also runs once with the second engine switched off, to show what the double-check buys.
 const path = require('path');
-const { openApp, drawRoute, buildLinks, matchScore, distToRouteM, alongRoute, secondOpinion, suite, OUT } = require('./lib');
+const { openApp, drawRoute, buildLinks, matchScore, distToRouteM, alongRoute, outsideOpinion, suite, OUT } = require('./lib');
 
 const P = {
   library: [43.0086229, -88.2328702], carroll: [43.0039527, -88.2292641], framePark: [43.0182516, -88.2241790],
@@ -17,14 +18,14 @@ const P = {
 };
 
 const SCENARIOS = [
-  { id: 'direct', title: 'Fastest route as drawn (library to Frame Park)', pts: [P.library, P.framePark], expectStops: [0, 0] },
-  { id: 'detour', title: 'One deliberate detour (library to Frame Park past the hospital)', pts: [P.library, P.hospital, P.framePark], expectStops: [1, 6] },
-  { id: 'scenic', title: 'Several must-pass places across town', pts: [P.grocery, P.carroll, P.courthouse, P.airport], expectStops: [1, 9] },
-  { id: 'loop', title: 'Loop that ends near where it starts', pts: [P.library, P.framePark, P.courthouse, P.hospital, P.carroll], expectStops: [1, 9] },
-  { id: 'highway', title: 'Longer trip where the fastest way is the highway (Waukesha to Brookfield)', pts: [P.library, P.brookfield], expectStops: [0, 0] },
-  { id: 'no-highway', title: 'Same trip drawn on surface streets instead of the highway', pts: [P.library, P.greenfieldAve, P.brookfield], expectStops: [0, 9] },
-  { id: 'manhattan', title: 'Dense one-way streets (Times Square to Union Square past the Empire State Building)', pts: [P.timesSq, P.empire, P.unionSq], expectStops: [0, 6] },
-  { id: 'london', title: 'Outside the US, driving on the left (London Eye to Tower Bridge past St Paul\'s)', pts: [P.londonEye, P.stPauls, P.towerBridge], expectStops: [0, 8] },
+  { id: 'direct', title: 'Fastest route as drawn (library to Frame Park)', pts: [P.library, P.framePark], expectStops: [0, 12] },
+  { id: 'detour', title: 'One deliberate detour (library to Frame Park past the hospital)', pts: [P.library, P.hospital, P.framePark], expectStops: [1, 18] },
+  { id: 'scenic', title: 'Several must-pass places across town', pts: [P.grocery, P.carroll, P.courthouse, P.airport], expectStops: [1, 27] },
+  { id: 'loop', title: 'Loop that ends near where it starts', pts: [P.library, P.framePark, P.courthouse, P.hospital, P.carroll], expectStops: [1, 27] },
+  { id: 'highway', title: 'Longer trip where the fastest way is the highway (Waukesha to Brookfield)', pts: [P.library, P.brookfield], expectStops: [0, 12] },
+  { id: 'no-highway', title: 'Same trip drawn on surface streets instead of the highway', pts: [P.library, P.greenfieldAve, P.brookfield], expectStops: [0, 27] },
+  { id: 'manhattan', title: 'Dense one-way streets (Times Square to Union Square past the Empire State Building)', pts: [P.timesSq, P.empire, P.unionSq], expectStops: [0, 18] },
+  { id: 'london', title: 'Outside the US, driving on the left (London Eye to Tower Bridge past St Paul\'s)', pts: [P.londonEye, P.stPauls, P.towerBridge], expectStops: [0, 24] },
 ];
 
 module.exports = async function live(browser, url) {
@@ -33,6 +34,17 @@ module.exports = async function live(browser, url) {
 
   for (const sc of SCENARIOS) {
     await S.test(sc.title, async t => {
+      // First the old way (one routing engine), as a baseline for comparison.
+      const one = await openApp(browser, url, { double: false });
+      await drawRoute(one.page, sc.pts);
+      const r1 = await buildLinks(one.page);
+      t.check(r1, 'no single-engine result: ' + (await one.page.textContent('#toast')));
+      const desired1 = await one.page.evaluate(() => window.DMR.S.desired.coords);
+      const out1 = await outsideOpinion(one.page, [r1.origin, ...r1.stops, r1.dest]);
+      const before = out1 ? matchScore(desired1, out1) : null;
+      await one.ctx.close();
+
+      // Then the default: stops must hold the route in two engines.
       const { ctx, page, errors, calls } = await openApp(browser, url);
       const t0 = Date.now();
       const desired = await drawRoute(page, sc.pts);
@@ -42,25 +54,29 @@ module.exports = async function live(browser, url) {
       await page.waitForTimeout(1500);
       await page.screenshot({ path: path.join(OUT, `live-${sc.id}.png`) });
 
-      const own = r.score, indep = matchScore(desired.coords, r.predicted);
-      const second = await secondOpinion(page, [r.origin, ...r.stops, r.dest], r.avoid).catch(() => null);
-      const secondScore = second ? matchScore(desired.coords, second) : null;
+      const indep = matchScore(desired.coords, r.predicted), indep2 = r.predicted2 ? matchScore(desired.coords, r.predicted2) : null;
+      const out = await outsideOpinion(page, [r.origin, ...r.stops, r.dest]);
+      const after = out ? matchScore(desired.coords, out) : null;
       const offLine = r.stops.map(s => distToRouteM(s, desired.coords)), worstOff = Math.max(0, ...offLine);
       const order = r.stops.map(s => alongRoute(s, desired.coords));
-      const m = { id: sc.id, km: +(desired.distance / 1000).toFixed(1), stops: r.stops.length, parts: r.parts.length, avoidHighways: !!r.avoid, appMatch: Math.round(own * 100), independentMatch: Math.round(indep * 100), secondOpinion: secondScore == null ? null : Math.round(secondScore * 100), seconds: +secs.toFixed(1), routerCalls: calls.osrm + calls.valhalla };
+      const pct = x => x == null ? null : Math.round(x * 100);
+      const m = { id: sc.id, km: +(desired.distance / 1000).toFixed(1), stopsOneEngine: r1.stops.length, stops: r.stops.length, parts: r.parts.length, checked: r.checked, appMatch: Math.floor(r.match * 100), engine1: pct(r.score), engine2: pct(r.score2), remeasured1: pct(indep), remeasured2: pct(indep2), outsideBefore: pct(before), outsideAfter: pct(after), seconds: +secs.toFixed(1), routerCalls: calls.osrm + calls.valhalla };
       metrics.push(m);
-      t.note(`${m.km} km, ${m.stops} stop${m.stops === 1 ? '' : 's'}${m.avoidHighways ? ' + avoid highways' : ''}, app says ${m.appMatch}%, re-measured ${m.independentMatch}%, second router ${m.secondOpinion == null ? 'unavailable' : m.secondOpinion + '%'}, ${m.seconds}s, ${m.routerCalls} router calls`);
+      t.note(`${m.km} km. Stops: ${m.stopsOneEngine} with one engine, ${m.stops} with two. App says ${m.appMatch}% (engines ${m.engine1}% / ${m.engine2 ?? 'n/a'}%). Outside judge: ${m.outsideBefore ?? 'n/a'}% before, ${m.outsideAfter ?? 'n/a'}% after. ${m.seconds}s, ${m.routerCalls} router calls.`);
 
       t.check(errors.length === 0, errors.join('; '));
-      t.check(own >= 0.97, `app's predicted match is only ${m.appMatch}%`);
-      t.check(indep >= 0.95, `app claims ${m.appMatch}% but re-measuring gives ${m.independentMatch}%`);
+      if (r.checked !== 'two') t.warn('the second routing engine did not answer during this run, so the app fell back to one engine');
+      t.check(r.score >= 0.97, `first engine only follows ${m.engine1}% of the route`);
+      t.check(indep >= 0.95, `app claims ${m.engine1}% for the first engine but re-measuring gives ${m.remeasured1}%`);
+      t.check(indep2 == null || Math.abs(indep2 - r.score2) <= 0.06, `app claims ${m.engine2}% for the second engine but re-measuring gives ${m.remeasured2}%`);
       t.check(r.stops.length >= sc.expectStops[0] && r.stops.length <= sc.expectStops[1], `expected ${sc.expectStops[0]}-${sc.expectStops[1]} stops, got ${r.stops.length}`);
       t.check(worstOff <= 15, `a stop sits ${Math.round(worstOff)} m off the drawn route`);
       t.check(order.every((a, i) => i === 0 || a >= order[i - 1] - 30), 'stops are not in driving order');
       t.check(r.parts.every(p => p.w.length <= 9), 'a link has more than 9 stops');
       for (const g of r.google) { const u = new URL(g); t.check(u.searchParams.get('destination') && u.searchParams.get('origin'), 'Google link is missing a start or end'); }
-      if (secondScore != null && secondScore < 0.9) t.warn(`a different router only follows ${m.secondOpinion}% of the drawn route with these stops, so Google or Apple may stray too`);
-      if (secs > 45) t.warn(`took ${m.seconds}s to make the links`);
+      if (r.match < 0.97) t.warn(`the two engines agree on only ${m.appMatch}% of the route even with stops`);
+      if (after != null && after < 0.9) t.warn(`an outside routing engine follows only ${m.outsideAfter}% of the drawn route with these stops`);
+      if (secs > 60) t.warn(`took ${m.seconds}s to make the links`);
       await ctx.close();
     });
   }

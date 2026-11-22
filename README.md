@@ -22,7 +22,10 @@ It is a static site: there is no server and no build step. Everything runs in th
 The page calls these free public services straight from the visitor's browser:
 
 - Map tiles: OpenStreetMap
-- Routing: the public OSRM demo server, and the public Valhalla server for avoid-highways predictions
+- Routing: the public OSRM demo server, plus the public Valhalla server as a second opinion.
+  Stops are only accepted when both engines follow the drawn route with them, because Google and Apple
+  each route differently and stops that convince a single engine are fragile.
+  The double-check can be switched off under Options on the result screen.
 - Search: Nominatim
 
 They are fine for personal and light use but are rate-limited and come with no uptime promise.
@@ -41,9 +44,10 @@ Setup, once: install Node.js, then run `npm install` and `npx playwright install
   loading, tapping, link building, share links, search, and what happens when the routing service fails.
 - `npm run test:live` uses the real map, routing and search services. It draws a set of real routes
   (short, detour, loop, highway, surface streets, Manhattan one-ways, London) and checks each result three ways:
-  the app's predicted match, an independent re-measurement of it, and a second router's opinion of the same stops.
+  the app's predicted match in both of its routing engines, an independent re-measurement of it, and the opinion of
+  an outside engine the app never uses (BRouter). Each route is also run with the double-check off for comparison.
 - `npm test` runs both. Screenshots and `report.json` land in `tests/output/`.
 - `npm run serve` just runs the private copy at http://127.0.0.1:8123/ so you can click around yourself.
 
-A warning in the live tests means the app's links work by its own prediction but a second router took a different road,
-which is the best available hint that Google Maps or Apple Maps might too.
+A warning in the live tests means the links hold in the app's own two engines but the outside engine took a different
+road, which is the best available hint that Google Maps or Apple Maps might too.

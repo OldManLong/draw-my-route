@@ -13,8 +13,10 @@ async function launch() {
 }
 
 /* Opens the site on an emulated iPhone and collects every error the page raises. */
-async function openApp(browser, url, { mock } = {}) {
+async function openApp(browser, url, { mock, double } = {}) {
   const ctx = await browser.newContext({ ...devices['iPhone 13'], permissions: [] });
+  // double: false switches off the app's second-router check (it is on by default).
+  if (double === false) await ctx.addInitScript(() => { try { localStorage.setItem('dmr.double', 'false'); } catch (e) {} });
   const page = await ctx.newPage();
   const errors = [], calls = { osrm: 0, valhalla: 0, nominatim: 0, tiles: 0 };
   page.on('pageerror', e => errors.push('page error: ' + e.message));
@@ -52,7 +54,7 @@ async function buildLinks(page, timeout = 240000) {
     if (!r) return null;
     const parts = D.splitParts(r.origin, r.dest, r.stops);
     return {
-      origin: r.origin, dest: r.dest, stops: r.stops, score: r.score, avoid: r.avoid, avoidOnly: r.avoidOnly, crossed: r.crossed, zones: r.zones, blocked: r.blocked,
+      origin: r.origin, dest: r.dest, stops: r.stops, score: r.score, score2: r.score2, match: r.match, checked: r.checked, predicted2: r.cand2 ? r.cand2.coords : null, avoid: r.avoid, avoidOnly: r.avoidOnly, crossed: r.crossed, zones: r.zones, blocked: r.blocked,
       predicted: r.cand.coords, parts,
       google: parts.map(p => D.googleLink(p, false, r.avoid)), apple: parts.map(p => D.appleLink(p, false, r.avoid)),
       share: D.shareLink(), heading: document.querySelector('#sheet h2').textContent,
@@ -103,6 +105,16 @@ async function secondOpinion(page, pts, avoidHighways) {
   }, [pts, avoidHighways]);
 }
 
+/* An outside judge: BRouter, a routing engine the app never uses. Asked from inside the page with the app's stops as via points. */
+async function outsideOpinion(page, pts) {
+  await new Promise(r => setTimeout(r, 700)); // be polite to the free server
+  return page.evaluate(async pts => {
+    const u = 'https://brouter.de/brouter?lonlats=' + pts.map(p => p[1].toFixed(6) + ',' + p[0].toFixed(6)).join('|') + '&profile=car-fast&alternativeidx=0&format=geojson';
+    const r = await fetch(u); if (!r.ok) return null;
+    const j = await r.json(); return j.features[0].geometry.coordinates.map(c => [c[1], c[0]]);
+  }, pts).catch(() => null);
+}
+
 /* Tiny test runner. */
 function suite(name) {
   const results = [];
@@ -119,4 +131,4 @@ function suite(name) {
   };
 }
 
-module.exports = { OUT, launch, openApp, drawRoute, buildLinks, matchScore, distToRouteM, alongRoute, secondOpinion, suite };
+module.exports = { OUT, launch, openApp, drawRoute, buildLinks, matchScore, distToRouteM, alongRoute, secondOpinion, outsideOpinion, suite };
