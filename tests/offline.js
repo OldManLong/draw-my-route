@@ -120,6 +120,12 @@ module.exports = async function offline(browser, url) {
     t.check(r.stops.length >= 1 && r.stops.length <= 2, `bent route: expected 1-2 stops, got ${r.stops.length}`);
     t.check(r.score >= 0.97, `bent route match only ${Math.round(r.score * 100)}%`);
     t.check(r.google[0].includes('waypoints=') && r.apple[0].includes('waypoint='), 'links are missing the stop');
+    // Stops go out as bare GPS coordinates, never as a name or address, so nobody mistakes one for the destination.
+    const coord = /^-?\d{1,3}\.\d{6},-?\d{1,3}\.\d{6}$/;
+    const gStops = new URL(r.google[0]).searchParams.get('waypoints').split('|'), aStops = new URL(r.apple[0]).searchParams.getAll('waypoint');
+    t.check(gStops.length === r.stops.length && gStops.every(w => coord.test(w)), 'a Google stop is not a plain coordinate pair: ' + gStops.join(' | '));
+    t.check(aStops.length === r.stops.length && aStops.every(w => coord.test(w)), 'an Apple stop is not a plain coordinate pair: ' + aStops.join(' | '));
+    t.check((await page.textContent('#sheet')).includes('sent as map coordinates'), 'result screen does not explain that stops are coordinates');
     await page.screenshot({ path: path.join(OUT, 'offline-result.png') });
     await ctx.close();
   });
@@ -343,6 +349,59 @@ module.exports = async function offline(browser, url) {
     await page.screenshot({ path: path.join(OUT, 'offline-local-drag.png') });
     slow = false; await page.mouse.up();
     await page.waitForFunction(() => window.DMR.S.pts.length === 3 && window.DMR.S.pts[1].snapped && !window.DMR.S.busy && !!window.DMR.S.grab, null, { timeout: 12000 });
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Roads on the phone: shaping a route asks no routing server; only sending does', async t => {
+    const { ctx, page, errors, calls } = await openApp(browser, url, { mock: fakeServices({ roads: waukeshaRoads }) });
+    await drawRoute(page, [W.library, W.airport]);
+    await page.waitForFunction(() => window.DMR.local.status === 'ready', null, { timeout: 8000 });
+    const first = calls.osrm + calls.valhalla;                           // at most the one request made before the roads arrived
+    t.check(first <= 1, `${first} routing requests before the roads arrived`);
+    await page.waitForTimeout(500);
+    // drag the line, then mark a road to avoid
+    const mid = await page.evaluate(() => { const D = window.DMR, c = D.S.desired.coords, p = D.map.latLngToContainerPoint(c[Math.floor(c.length / 2)]); return [p.x, p.y]; });
+    await page.mouse.move(mid[0], mid[1]); await page.mouse.down();
+    for (let i = 1; i <= 10; i++) await page.mouse.move(mid[0] - 4 * i, mid[1] + i, { steps: 2 });
+    await page.mouse.up();
+    await page.waitForFunction(() => window.DMR.S.pts.length === 3 && window.DMR.S.pts[1].snapped && !window.DMR.S.busy && !!window.DMR.S.grab, null, { timeout: 8000 });
+    const shaped = await page.evaluate(() => ({ by: window.DMR.S.desired.src, n: window.DMR.S.desired.coords.length, km: window.DMR.S.desired.distance / 1000 }));
+    t.check(shaped.by === 'phone' && shaped.n > 20, `route after the drag was drawn by ${shaped.by} with ${shaped.n} points`);
+    await page.evaluate(() => { const D = window.DMR, c = D.S.desired.coords; D.S.zones.push(c[Math.floor(c.length * 0.8)]); D.changed(); });
+    await page.waitForFunction(() => window.DMR.S.desired && !window.DMR.S.busy && window.DMR.S.zones.length === 1 && !!window.DMR.S.grab, null, { timeout: 8000 });
+    await page.waitForTimeout(400);
+    const around = await page.evaluate(() => { const D = window.DMR, z = D.S.zones[0]; return { by: D.S.desired.src, nearest: Math.min(...D.S.desired.coords.map(c => Math.hypot((c[0] - z[0]) * 110540, (c[1] - z[1]) * 81400))) }; });
+    t.check(around.by === 'phone' && around.nearest > 40, `after marking a road the route passes ${Math.round(around.nearest)} m from it (drawn by ${around.by})`);
+    const shaping = calls.osrm + calls.valhalla - first;
+    t.note(`${first} routing request(s) to get started, ${shaping} while dragging and marking a road`);
+    t.check(shaping === 0, `${shaping} routing-server requests were made while shaping the route`);
+    // sending is the one step that asks the server
+    const r = await buildLinks(page);
+    const sending = calls.osrm + calls.valhalla - first - shaping;
+    t.note(`${sending} routing request(s) to send it; the sent line shares ${Math.round(r.same * 100)}% of the shaped line (the test's stand-in server only knows straight lines)`);
+    t.check(r && sending >= 1, 'sending did not consult the routing server');
+    t.check(r.stops.length >= 1 && r.parts.every(p => p.w.length <= 9), 'links were not built');   // the stand-in servers disagree wildly, so the count means nothing here
+    t.check((await page.textContent('#sheet')).includes('different side streets'), 'result does not say the sent line differs from the shaped one');
+    await page.click('#b-edit');
+    t.check(await page.evaluate(() => window.DMR.S.line.getLatLngs().length > 20), 'going back to edit did not restore the shaped line');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Roads on the phone: if the routing server is down at send time, sending fails with a message and the route is kept', async t => {
+    let down = false;
+    const straight = (route, u) => { if (down) return route.abort(); const pts = u.split('/driving/')[1].split('?')[0].split(';').map(s => s.split(',').map(Number)); return json(route, { code: 'Ok', routes: [{ distance: 1000, duration: 100, geometry: { coordinates: pts }, legs: [{ steps: [{ intersections: [] }] }] }] }); };
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ roads: waukeshaRoads, osrm: straight }) });
+    await drawRoute(page, [W.library, W.airport]);
+    await page.waitForFunction(() => window.DMR.local.status === 'ready' && !window.DMR.S.busy, null, { timeout: 8000 });
+    await page.evaluate(() => window.DMR.changed());                     // make sure the line on screen is the phone's
+    await page.waitForFunction(() => window.DMR.S.desired && window.DMR.S.desired.src === 'phone' && !window.DMR.S.busy, null, { timeout: 8000 });
+    down = true;
+    const r = await buildLinks(page, 60000);
+    t.check(r === null, 'expected sending to fail cleanly with the routing server down');   // stops cannot be worked out without it
+    t.check(await page.evaluate(() => window.DMR.S.mode === 'draw' && window.DMR.S.pts.length === 2), 'the route was lost');
+    t.check((await page.textContent('#toast')).length > 0, 'no message shown');
     t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
   });

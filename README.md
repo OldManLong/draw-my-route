@@ -11,9 +11,12 @@ How it works for the person using it:
 2. Drag the orange line onto the roads you want. On a phone, press and hold the line first, then drag.
    While you drag, the route follows your finger. The page downloads the roads around your trip
    (`roads.js`, from OpenStreetMap's Overpass service) and works out each redraw on the phone itself,
-   so there is no wait. The routing server still draws the final line when you pause or let go.
-   If the road download fails, or the trip covers too large an area, it falls back to asking the server
-   about three times a second.
+   so there is no wait and no routing server is asked while you shape the route, including when you mark
+   a road to avoid. If the road download fails, or the trip covers too large an area (about 700 km²),
+   shaping falls back to asking the routing server.
+   Only the send step asks the routing server: once for its own line through your pins, which is the best
+   stand-in for what Google and Apple will choose, and then to work out the stops. If that line uses
+   different side streets from the one you shaped, the result screen says so.
    Where you let go, the route snaps to a road, and larger roads are favoured: a drop near a main road lands
    on it instead of on the side street or car park beside it. Freeways get no such favour.
    Or tap **Avoid a road** and tap any road you would rather not drive on; the route moves off it.

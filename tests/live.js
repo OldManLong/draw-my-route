@@ -108,7 +108,7 @@ module.exports = async function live(browser, url) {
     await ctx.close();
   });
 
-  await S.test('On-phone preview agrees with the routing server (so the line rarely shifts when you let go)', async t => {
+  await S.test('On-phone routes compared with the routing server (how often the sent line differs from the shaped one)', async t => {
     // The road-data service is unreachable from the test machine, so real Waukesha roads from the fixture stand in for it. Routing is the real server.
     const { waukeshaOverpass } = require('./fixture'); const body = JSON.stringify(waukeshaOverpass());
     const { ctx, page, errors } = await openApp(browser, url);
@@ -120,7 +120,7 @@ module.exports = async function live(browser, url) {
       await page.waitForFunction(() => window.DMR.local.status === 'ready', null, { timeout: 15000 });
       // Pins in the middle are snapped onto a road first, as they are when the line is dragged in the app.
       for (let i = 1; i < pts.length - 1; i++) pts[i] = (await page.evaluate(p => window.DMR.snapToRoad(p, false), pts[i])).ll;
-      const server = await drawRoute(page, pts);
+      const server = await page.evaluate(pts => window.DMR.route(pts), pts); // the routing server's own line
       const mine = await page.evaluate(pts => { const D = window.DMR, t0 = performance.now(), r = D.local.net.route(pts.map(p => p.slice())); return r && { coords: r.coords, ms: performance.now() - t0 }; }, pts);
       t.check(mine, `${name}: no on-phone route`);
       const m = matchScore(server.coords, mine.coords); scores.push(m);
@@ -129,7 +129,7 @@ module.exports = async function live(browser, url) {
     const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
     t.note(`average agreement ${Math.round(avg * 100)}%`);
     t.check(errors.length === 0, errors.join('; '));
-    if (avg < 0.85) t.warn(`on-phone previews match the server on only ${Math.round(avg * 100)}% of the route on average, so the line will often shift on release`);
+    if (avg < 0.85) t.warn(`on-phone routes share only ${Math.round(avg * 100)}% of their roads with the server's on average, so the line sent to the maps apps will often differ in side streets from the one shaped`);
     await ctx.close();
   });
 

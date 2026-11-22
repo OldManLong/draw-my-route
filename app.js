@@ -363,8 +363,10 @@ function drawZones(){
       div.querySelector('button').onclick=()=>{map.closePopup();S.zones.splice(i,1);drawZones();changed()};m.bindPopup(div,{closeButton:false}).openPopup()});
     S.zoneLayers.push(m)});
 }
-let rt;function changed(){drawPoints();syncEnds();clearTimeout(rt);rt=setTimeout(recompute,200);render()}
+let rt;function changed(){drawPoints();syncEnds();clearTimeout(rt);rt=setTimeout(recompute,200);render();ensureLocal()}
 async function routeFor(pts,warn){
+  // Roads for this area are on the phone: route here, no server asked. (Falls through if a point is off the downloaded roads.)
+  if(S.snap&&localCovers(pts)){const r=local.net.route(pts,{blocked:localBlocked(),cache:local.cache});if(r){r.src='phone';return r}}
   if(!S.snap){let d=0;for(let i=1;i<pts.length;i++)d+=hav(pts[i-1],pts[i]);return {coords:pts.slice(),distance:d,duration:d/13}}
   if(S.zones.length&&!DEMO){
     // Roads marked ✕: ask the engine that can keep off given spots. If it can't answer, fall back and say so.
@@ -404,11 +406,11 @@ const boxHolds=(B,b)=>!!B&&b[0]>=B[0]&&b[1]>=B[1]&&b[2]<=B[2]&&b[3]<=B[3];
 const boxKm2=b=>(b[2]-b[0])*110.54*(b[3]-b[1])*111.32*Math.cos((b[0]+b[2])/2*Math.PI/180);
 const localCovers=pts=>local.status==='ready'&&boxHolds(local.box,boxAround(pts,150));
 async function ensureLocal(){
-  if(DEMO||!ROADS||!S.desired||!S.snap)return;
-  const need=boxAround(S.desired.coords,400);
+  if(DEMO||!ROADS||!S.snap||S.pts.length<2)return;
+  const around=S.desired?S.desired.coords:S.pts,need=boxAround(around,400);
   if(boxHolds(local.box,need)&&(local.status==='ready'||local.status==='loading'))return;
   const span=Math.max((need[2]-need[0])*110540,(need[3]-need[1])*111320*Math.cos(need[0]*Math.PI/180));
-  const box=boxAround(S.desired.coords,Math.max(1500,0.3*span));       // room to drag the line well off the direct way
+  const box=boxAround(around,Math.max(1500,0.3*span));       // room to drag the line well off the direct way
   if(boxKm2(box)>700){local.job++;Object.assign(local,{status:'toobig',box:null,net:null});return}   // long trips: too much road data for a phone
   if(local.status==='failed'&&Date.now()-local.failedAt<60000)return;
   const job=++local.job;Object.assign(local,{status:'loading',box,net:null});
@@ -480,8 +482,7 @@ function liveStart(idx,fine,snapOk){
 function liveMove(ll,x,y){
   if(!live.on)return;S.pts[live.idx]=ll;live.pt=[x,y];live.dirty=true;
   if(localCovers(S.pts)){                                              // roads are on the phone: redraw every frame, ask the server once the finger pauses
-    if(!live.raf)live.raf=requestAnimationFrame(livePreview);
-    clearTimeout(live.t);live.t=setTimeout(liveRoute,140)}
+    if(!live.raf)live.raf=requestAnimationFrame(livePreview)}   // and no server is asked
   else{liveRoute();liveSnap()}
 }
 function livePreview(){
@@ -583,18 +584,30 @@ async function build(){
     const second=!DEMO&&lv.second?pts=>valhallaRoute(pts,false):null;        // second opinion: a different routing engine, normal driving settings
     const base={maxStops:40,maxGap:lv.maxGap,zones:S.zones,zoneR:ZONE_R,strict:S.strict||S.pts.length>2,second};
     const prog=pre=>(n,two)=>{const el=$('prog');if(el)el.textContent=two?`Double-checking with a second routing engine (${n} stop${n===1?'':'s'} so far)…`:pre+(n?`testing with ${n} stop${n>1?'s':''}…`:'testing the fastest route…')};
-    const res=await findStops(S.desired.coords,base,prog('Google and Apple: '));
+    // The route was shaped on the phone. What Google and Apple are asked to follow is the routing server's line through the
+    // same pins (and round the same ✕ marks): it is the closest stand-in for their own choice, so it needs the fewest stops.
+    let line=S.desired;
+    if(S.desired.src==='phone'){
+      try{line=S.zones.length?await valhallaRoute(S.pts,false,S.zones):await route(S.pts)}
+      catch(e){line=S.desired}                                         // server unreachable: send the phone's line as drawn
+    }
+    S.sent=line;
+    const res=await findStops(line.coords,base,prog('Google and Apple: '));
     const pick=res;
-    pick.level=S.level;S.result=pick;S.mode='result';showResult();render();fitRoute(S.desired.coords);return;
+    pick.same=line===S.desired?1:lineMatch(S.desired.coords,line.coords);   // how much of the shaped line the sent line shares
+    pick.level=S.level;S.result=pick;S.mode='result';showResult();render();fitRoute(line.coords);return;
   }catch(e){toast(e.message||'Something went wrong. Try again.');S.mode='draw';drawPoints()}
   render();
 }
+/* Share of line a that runs along line b (within TOL metres). */
+function lineMatch(aLL,bLL){setRef(aLL[0]);const A=resample(aLL.map(P),15),ix=indexLine(resample(bLL.map(P),15).pts);
+  let on=0;for(const p of A.pts)if(distToLine(ix,p)<=TOL)on++;return A.pts.length?on/A.pts.length:1}
 function fitRoute(coords){if(!coords||coords.length<2)return;const h=sheet.offsetHeight;map.fitBounds(L.latLngBounds(coords),{paddingTopLeft:[28,130],paddingBottomRight:[28,h+20],maxZoom:17})}
 function clearResult(){S.resLayers.forEach(l=>map.removeLayer(l));S.resLayers=[]}
 function showResult(){
   clearResult();const r=S.result;if(!r)return;
   S.markers.forEach(m=>map.removeLayer(m));S.markers=[];drawZones();
-  if(S.line){S.line.setStyle({opacity:.95});}
+  if(S.line&&S.sent)S.line.setLatLngs(S.sent.coords);                 // show the line that is being sent
   S.resLayers.push(L.polyline(r.cand.coords,{color:css('--accent'),weight:3,dashArray:'6 7',opacity:.9}).addTo(map));
   const parts=splitParts(r.origin,r.dest,r.stops);let n=0;
   parts.forEach((p,pi)=>{p.w.forEach(w=>{n++;S.resLayers.push(L.marker(w,{icon:pinIcon(n,'fake'),interactive:false}).addTo(map))});
@@ -608,7 +621,7 @@ async function copyText(text,btn){
 }
 function flash(btn,t){if(!btn)return;const o=btn.textContent;btn.textContent=t;setTimeout(()=>btn.textContent=o,1600)}
 function shareLink(){
-  const r=S.result;const simp=simplify(S.desired.coords.map(P),6).map(U);
+  const r=S.result;const simp=simplify((S.sent||S.desired).coords.map(P),6).map(U);
   const data={v:1,n:S.name||'',o:r.origin.map(x=>+x.toFixed(6)),d:r.dest.map(x=>+x.toFixed(6)),s:r.stops.map(s=>s.map(x=>+x.toFixed(6))),z:S.zones.map(s=>s.map(x=>+x.toFixed(5))),...(r.avoid?{aa:1}:{}),...(S.note.trim()?{t:S.note.trim().slice(0,140)}:{}),p:encPoly(simp),m:+r.match.toFixed(3)};
   return location.href.split('#')[0]+'#r='+b64u.enc(JSON.stringify(data));
 }
@@ -643,7 +656,7 @@ function linkBlocks(r){
     <div class="row"><button class="btn small" data-copy="g${i}">Copy Google link</button><button class="btn small" data-copy="a${i}">Copy Apple link</button></div></div>`).join('')
     +(av?`<p class="hint">Both links turn on <b>Avoid highways</b> for this trip, which ${r.stops.length?'saves stops':'means no stops at all'}.</p>`:'');
 }
-function editRoute(){clearResult();S.result=null;S.mode='draw';drawPoints();drawZones();render()}
+function editRoute(){clearResult();S.result=null;S.mode='draw';if(S.line&&S.desired)S.line.setLatLngs(S.desired.coords);drawPoints();drawZones();render()}
 function render(){
   const m=S.mode;$('top').hidden=m==='viewer';
   if(m==='draw'){
@@ -674,7 +687,8 @@ function render(){
         :(ns?'Google Maps and Apple Maps will route through these points in order, which keeps them on your path.':'The fastest route already follows your path, so the links just go from A to B.')}</p>
       ${r.avoidOnly?`<div class="match ${good?'good':'warn'}">${good?`<b>✓</b> Predicted to stay off ${r.zones===1?'the':'all'} ${nzs}`:`<b>${r.crossed}</b> marked spot${r.crossed===1?' is':'s are'} still on the predicted route. Draw your route around ${r.crossed===1?'it':'them'}.`}</div>`
         :`<div class="match ${good?'good':'warn'}"><b>${pct}%</b> predicted match with your route${good?'':'. Try moving one of your points onto a main road, or add a point where the dashed line strays.'}</div>`}
-      <div class="legend"><span><i></i>Your drawing</span><span><i class="pred"></i>Predicted drive in Google/Apple</span>${r.zones?'<span><i class="x"></i>Road to avoid</span>':''}</div>
+      ${r.same<0.9?'<p class="hint">Between your pins, the maps apps are expected to use some different side streets from the line you shaped. The orange line shows what is being sent. Go back and add a pin on any road that matters to you.</p>':''}
+      <div class="legend"><span><i></i>Your route</span><span><i class="pred"></i>Predicted drive in Google/Apple</span>${r.zones?'<span><i class="x"></i>Road to avoid</span>':''}</div>
       <div class="seg" role="tablist" aria-label="How many stops">${Object.keys(LEVELS).map(k=>`<button role="tab" data-level="${k}" aria-selected="${S.level===k}" class="${S.level===k?'on':''}">${LEVELS[k].label}</button>`).join('')}</div>
       <p class="hint">${(LEVELS[S.level]||LEVELS.few).note}${r.checked==='failed'?' The second routing engine was unavailable just now, so this was checked with one engine only.':''}</p>
       ${r.blocked?`<p class="hint">${r.blocked} ✕ ${r.blocked===1?'is':'are'} on your own route, so ${r.blocked===1?'it was':'they were'} ignored.</p>`:''}
@@ -687,7 +701,7 @@ function render(){
         ${S.zones.length&&S.pts.length<=2?`<label class="toggle"><input type="checkbox" id="t-strict" ${S.strict?'checked':''}> Follow my whole drawn route exactly (more stops)</label>`:''}
         <label class="toggle"><input type="checkbox" id="t-here" ${S.fromHere?'checked':''}> Start from the driver's current location (your start becomes the first stop)</label>
       </details>
-      <p class="hint">${ns?`Google and Apple treat each in-between point as a stop and will announce it. Just keep driving; if the app pauses, tap Continue or Resume. `:''}Apple Maps links need iOS 18.4 or later. Phone browsers without the Google Maps app only show the first 3 stops.</p>
+      <p class="hint">${ns?`Google and Apple treat each in-between point as a stop and will announce it. Stops are sent as map coordinates (numbers such as ${r.stops[0][0].toFixed(4)}, ${r.stops[0][1].toFixed(4)}), never as place names, so they are easy to tell from the real destination. Just keep driving; if the app pauses, tap Continue or Resume. `:''}Apple Maps links need iOS 18.4 or later. Phone browsers without the Google Maps app only show the first 3 stops.</p>
       <div class="row" style="margin-top:8px"><button class="btn small" id="b-edit">Edit route</button><button class="btn small" id="b-new">New route</button></div>`;
     sheet.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{const k=b.dataset.copy,i=+k.slice(1),here=S.fromHere&&i===0;copyText(k[0]==='g'?googleLink(parts[i],here,r.avoid):appleLink(parts[i],here,r.avoid),b)});
     if($('f-note'))$('f-note').oninput=e=>{S.note=e.target.value};
@@ -730,5 +744,5 @@ if(!DEMO&&location.hash.startsWith('#r=')&&openViewer()){}else{render();
 }
 
 /* Handle for the automated tests in tests/ (not used by the app itself). */
-window.DMR={map,S,local,live,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
+window.DMR={map,S,local,live,lineMatch,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
 })();
