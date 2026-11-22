@@ -269,6 +269,43 @@ module.exports = async function offline(browser, url) {
     await ctx.close();
   });
 
+  await S.test('The route follows the pointer live while dragging, before you let go', async t => {
+    const { ctx, page, errors, calls } = await openApp(browser, url, { mock: fakeServices() });
+    await drawRoute(page, [A, B]); await page.waitForTimeout(600);
+    const mid = await page.evaluate(([a, b]) => { const p = window.DMR.map.latLngToContainerPoint([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); return [p.x, p.y]; }, [A, B]);
+    const before = calls.osrm;
+    await page.mouse.move(mid[0], mid[1]); await page.mouse.down();
+    const seen = [];
+    for (let i = 1; i <= 4; i++) {                       // four pulls, pausing only long enough for a redraw to arrive
+      await page.mouse.move(mid[0], mid[1] - 20 * i, { steps: 3 });
+      await page.waitForFunction(y => { const D = window.DMR, c = D.S.desired && D.S.desired.coords; if (!c || c.length !== 3) return false; return Math.abs(D.map.latLngToContainerPoint(c[1]).y - y) < 4; }, mid[1] - 20 * i, { timeout: 4000 });
+      seen.push(await page.evaluate(() => { const D = window.DMR, ll = D.S.line.getLatLngs()[1]; return Math.round(D.map.latLngToContainerPoint(ll).y); }));
+    }
+    const during = calls.osrm - before;
+    t.note(`line bend followed to y = ${seen.join(', ')} while the button was still down; ${during} routing requests`);
+    t.check(seen.every((y, i) => Math.abs(y - (mid[1] - 20 * (i + 1))) < 4), 'the drawn line did not keep up with the pointer');
+    t.check(during >= 4 && during <= 16, `${during} routing requests during one drag (expected a handful, not a flood)`);
+    await page.mouse.up();
+    await page.waitForFunction(() => window.DMR.S.pts.length === 3 && !window.DMR.S.busy && !!window.DMR.S.grab, null, { timeout: 8000 });
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Dragging an existing pin also re-draws the route live', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices() });
+    await drawRoute(page, [A, MID, B]); await page.waitForTimeout(600);
+    const pin = await page.evaluate(() => { const p = window.DMR.map.latLngToContainerPoint(window.DMR.S.pts[1]); return [p.x, p.y]; });
+    await page.mouse.move(pin[0], pin[1]); await page.mouse.down();
+    await page.mouse.move(pin[0] + 10, pin[1] + 30, { steps: 5 });
+    await page.waitForFunction(y => { const D = window.DMR, c = D.S.desired.coords; return c.length === 3 && Math.abs(D.map.latLngToContainerPoint(c[1]).y - y) < 5; }, pin[1] + 30, { timeout: 4000 });
+    await page.mouse.up();
+    await page.waitForFunction(() => window.DMR.S.pts.length === 3 && !window.DMR.S.busy && !!window.DMR.S.grab, null, { timeout: 8000 });
+    const at = await page.evaluate(() => { const p = window.DMR.map.latLngToContainerPoint(window.DMR.S.pts[1]); return [p.x, p.y]; });
+    t.check(Math.abs(at[1] - (pin[1] + 30)) < 6, 'pin did not stay where it was dropped');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
   await S.test('Touch: press-and-hold then drag reshapes the line; a quick swipe across it just pans the map', async t => {
     const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices() });
     await drawRoute(page, [A, B]); await page.waitForTimeout(600);
@@ -301,8 +338,8 @@ module.exports = async function offline(browser, url) {
     const px = ll => page.evaluate(ll => { const p = window.DMR.map.latLngToContainerPoint(ll); return [p.x, p.y]; }, ll);
     const pull = async (from, to) => { await page.mouse.move(from[0], from[1]); await page.mouse.down(); for (let i = 1; i <= 6; i++) await page.mouse.move(from[0] + (to[0] - from[0]) * i / 6, from[1] + (to[1] - from[1]) * i / 6, { steps: 2 }); await page.mouse.up(); };
     const lonMid = (A[1] + B[1]) / 2, start = await px([A[0], lonMid]), road = await px([BIG_ROAD_LAT, lonMid]);
-    // let go 12 px short of the main road: it should jump onto it
-    await pull(start, [road[0], road[1] + 12]);
+    // let go 6 px short of the main road: it should jump onto it
+    await pull(start, [road[0], road[1] + 6]);
     await page.waitForFunction(() => window.DMR.S.pts.length === 3 && window.DMR.S.pts[1].snapped && !window.DMR.S.busy && window.DMR.S.desired.coords.length === 3, null, { timeout: 8000 });
     let pin = await page.evaluate(() => window.DMR.S.pts[1]);
     t.check(Math.abs(pin[0] - BIG_ROAD_LAT) < 1e-6, `pin landed at latitude ${pin[0].toFixed(5)}, not on the main road at ${BIG_ROAD_LAT}`);
@@ -369,6 +406,16 @@ module.exports = async function offline(browser, url) {
     t.note('message shown: "' + msg + '"');
     t.check(!/failed to fetch|typeerror|undefined/i.test(msg), 'the message is a raw technical error: "' + msg + '"');
     t.check(await page.evaluate(() => window.DMR.S.busy === 0), 'app is stuck on "Fitting your route"');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Routing service goes silent: the app stops waiting and says so instead of hanging', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ osrm: () => { /* never answer */ } }) });
+    await page.evaluate(([a, b]) => { const D = window.DMR; D.S.pts.push(a, b); D.changed(); }, [A, B]);
+    await page.waitForSelector('#toast:not([hidden])', { timeout: 30000 });
+    t.note('message shown: "' + await page.textContent('#toast') + '"');
+    t.check(await page.evaluate(() => window.DMR.S.busy === 0), 'app is still waiting');
     t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
   });

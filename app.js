@@ -72,9 +72,14 @@ function interDist(ll){const xy=ixy(ll),ci=Math.floor(xy[0]/INTER.cell),cj=Math.
 /* Hosted: public OSRM (OpenStreetMap) driving router. */
 /* Fetch JSON from a routing service: plain-language errors, and a few spaced retries when it says it is busy. */
 async function getJSON(url,tries=0){
-  let r;try{r=await fetch(url)}catch(e){throw new Error("Can't reach the routing service. Check your connection and try again.")}
+  let r;const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),10000);   // never wait on a silent server for more than 10 seconds
+  try{r=await fetch(url,{signal:ctl.signal})}
+  catch(e){clearTimeout(timer);                                                           // the free servers drop the odd connection: try once more before giving up
+    if(tries<1){await sleep(700);return getJSON(url,tries+1)}
+    throw new Error("Can't reach the routing service. Check your connection and try again.")}
   if(r.status===429){if(tries>=3)throw new Error('The routing service is busy right now. Wait a minute and try again.');await sleep(1500*(tries+1));return getJSON(url,tries+1)}
   try{return await r.json()}catch(e){throw new Error('The routing service is having trouble. Try again in a minute.')}
+  finally{clearTimeout(timer)}
 }
 let lastCall=0;
 async function osrmRoute(pts){
@@ -314,8 +319,12 @@ function drawPoints(){
   if(S.mode!=='draw')return;
   S.pts.forEach((p,i)=>{const last=i===S.pts.length-1&&i>0;
     const m=L.marker(p,{draggable:true,icon:pinIcon(i===0?'A':last?'B':i,i===0?'start':last?'end':'mid'),zIndexOffset:500}).addTo(map);
-    m.on('dragend',e=>{const ll=e.target.getLatLng();S.pts[i]=[ll.lat,ll.lng];if(i===0)S.fromLabel='';else if(last)S.toLabel='';
-      if(i>0&&!last)snapVia(i,finePointer(),true).then(ok=>{if(ok)changed()});else changed()});
+    const via=i>0&&!last;
+    m.on('dragstart',()=>{if(S.pts.length>1)liveStart(i,finePointer(),via)});
+    m.on('drag',e=>{const ll=e.target.getLatLng(),c=map.latLngToContainerPoint(ll);liveMove([ll.lat,ll.lng],c.x,c.y)});
+    m.on('dragend',e=>{const ll=e.target.getLatLng();if(!live.on||!liveNear(live.pt,[map.latLngToContainerPoint(ll).x,map.latLngToContainerPoint(ll).y]))S.pts[i]=[ll.lat,ll.lng];
+      if(i===0)S.fromLabel='';else if(last)S.toLabel='';
+      if(live.on)liveEnd();else changed()});
     m.on('click',()=>{const div=document.createElement('div');div.className='pop';div.innerHTML=`<b>${i===0?'Start':last?'Destination':'Your route goes through here'}</b><button class="btn small danger">Remove</button>`;
       div.querySelector('button').onclick=()=>{map.closePopup();removePt(i);changed()};m.bindPopup(div,{closeButton:false}).openPopup()});
     S.markers.push(m)});
@@ -355,17 +364,19 @@ function drawZones(){
     S.zoneLayers.push(m)});
 }
 let rt;function changed(){drawPoints();syncEnds();clearTimeout(rt);rt=setTimeout(recompute,200);render()}
+async function routeFor(pts,warn){
+  if(!S.snap){let d=0;for(let i=1;i<pts.length;i++)d+=hav(pts[i-1],pts[i]);return {coords:pts.slice(),distance:d,duration:d/13}}
+  if(S.zones.length&&!DEMO){
+    // Roads marked ✕: ask the engine that can keep off given spots. If it can't answer, fall back and say so.
+    try{return await valhallaRoute(pts,false,S.zones)}
+    catch(e){if(warn)toast("Couldn't route around your ✕ marks just now. Drag the line off those roads instead.",4500);return route(pts)}}
+  return route(pts);
+}
 function clearLine(){if(S.line){map.removeLayer(S.line);S.line=null}if(S.grab){map.removeLayer(S.grab);S.grab=null}}
 async function recompute(){
   if(S.pts.length<2){clearLine();S.desired=null;render();return}
   const id=++S.busy;render();
-  try{let r;
-    if(!S.snap){let d=0;for(let i=1;i<S.pts.length;i++)d+=hav(S.pts[i-1],S.pts[i]);r={coords:S.pts.slice(),distance:d,duration:d/13}}
-    else if(S.zones.length&&!DEMO){
-      // Roads marked ✕: ask the engine that can keep off given spots. If it can't answer, fall back and say so.
-      try{r=await valhallaRoute(S.pts,false,S.zones)}
-      catch(e){r=await route(S.pts);if(id===S.busy)toast("Couldn't route around your ✕ marks just now. Drag the line off those roads instead.",4500)}}
-    else r=await route(S.pts);
+  try{const r=await routeFor(S.pts,true);
     if(id!==S.busy)return;S.desired=r;
   }catch(e){if(id!==S.busy)return;S.desired=null;toast(e.message||'Could not fit your route to roads.')}
   S.busy=0;clearLine();
@@ -418,6 +429,49 @@ async function snapVia(idx,fine,announce){
 }
 const finePointer=()=>!matchMedia('(pointer:coarse)').matches;
 
+/* ---------------- Follow the finger live ---------------- */
+/* While a pin is being dragged the route is re-drawn continuously: one routing request in flight at a time, and a new
+   one sent as soon as it returns if the finger has moved. A road lookup runs alongside, so the preview already goes
+   via the larger road the pin will snap to when you let go. */
+const live={on:false,idx:-1,fine:true,snapOk:true,busy:false,dirty:false,snapBusy:false,snap:null,pt:null,lastSnap:0};
+const liveNear=(a,b,px=14)=>!!a&&!!b&&Math.hypot(a[0]-b[0],a[1]-b[1])<px;
+function liveStart(idx,fine,snapOk){
+  clearTimeout(rt);S.busy++;                                           // drop any re-route already on its way
+  Object.assign(live,{on:true,idx,fine,snapOk,busy:false,dirty:false,snapBusy:false,snap:null,pt:null});
+}
+function liveMove(ll,x,y){if(!live.on)return;S.pts[live.idx]=ll;live.pt=[x,y];live.dirty=true;liveRoute();liveSnap()}
+async function liveRoute(){
+  if(!live.on||live.busy||!live.dirty)return;
+  live.busy=true;live.dirty=false;
+  const idx=live.idx,pts=S.pts.slice();
+  if(live.snap&&liveNear(live.snap.at,live.pt))pts[idx]=live.snap.res.ll;
+  try{const r=await routeFor(pts,false);
+    if(live.on&&live.idx===idx){S.desired=r;
+      if(S.line)S.line.setLatLngs(r.coords);else S.line=L.polyline(r.coords,{color:css('--drawn'),weight:7,opacity:.95,interactive:false}).addTo(map);
+      const el=$('tripline');if(el)el.innerHTML=`<b>${fmtTime(r.duration)}</b> · ${fmtDist(r.distance)}`}}
+  catch(e){/* keep the last good line; the next move tries again */}
+  live.busy=false;if(live.on&&live.dirty)liveRoute();
+}
+async function liveSnap(){
+  if(!live.on||!live.snapOk||live.snapBusy||!live.pt)return;
+  const idx=live.idx;live.snapBusy=true;
+  const wait=live.lastSnap+700-Date.now();if(wait>0)await sleep(wait);   // road lookups: at most about one a second
+  if(!live.on||live.idx!==idx){live.snapBusy=false;return}
+  live.lastSnap=Date.now();const at=live.pt.slice();
+  const res=await snapToRoad(S.pts[idx],live.fine);
+  live.snapBusy=false;if(!live.on||live.idx!==idx)return;
+  if(res.tier!=='none'){live.snap={at,res};if(liveNear(at,live.pt)){live.dirty=true;liveRoute()}}
+  if(!liveNear(at,live.pt))liveSnap();
+}
+/* Let go: the pin snaps to its road (reusing the lookup just done if the finger has not moved since) and the route is finalised. */
+function liveEnd(){
+  if(!live.on)return;live.on=false;
+  const idx=live.idx,cur=S.pts[idx];
+  if(!live.snapOk){changed();return}
+  if(cur&&live.snap&&liveNear(live.snap.at,live.pt,3))cur.asking=Promise.resolve(live.snap.res);   // only if the finger really was still
+  drawPoints();snapVia(idx,live.fine,true).then(ok=>{if(ok)changed()});
+}
+
 /* ---------------- Drag the line ---------------- */
 /* Mouse: press the line and pull. Touch: press and hold the line for a moment (so panning the map still works), then pull.
    The spot you grabbed becomes a pin the route must pass through; pins can be dragged again or removed. */
@@ -435,7 +489,7 @@ function engageLineDrag(){
   drag.on=true;drag.hold=0;map.dragging.disable();
   const p=map.containerPointToLatLng(map.mouseEventToContainerPoint({clientX:drag.x,clientY:drag.y})),ll=[p.lat,p.lng],v=nearestVertex(ll);
   let idx=1;for(let k=1;k<S.pts.length-1;k++)if(nearestVertex(S.pts[k])<v)idx++;
-  S.pts.splice(idx,0,ll);drag.idx=idx;drawPoints();
+  S.pts.splice(idx,0,ll);drag.idx=idx;drawPoints();liveStart(idx,!drag.touch,true);
   if(navigator.vibrate)try{navigator.vibrate(10)}catch(err){}
 }
 function moveLineDrag(e){
@@ -447,16 +501,15 @@ function moveLineDrag(e){
   }
   e.preventDefault();
   const p=map.containerPointToLatLng(map.mouseEventToContainerPoint(e));
-  S.pts[drag.idx]=[p.lat,p.lng];if(S.markers[drag.idx])S.markers[drag.idx].setLatLng(p);
-  const idx=drag.idx,fine=!drag.touch;
-  clearTimeout(rt);rt=setTimeout(async()=>{if(await snapVia(idx,fine,false))recompute()},300);   // re-route whenever the pull pauses
+  if(S.markers[drag.idx])S.markers[drag.idx].setLatLng(p);
+  liveMove([p.lat,p.lng],e.clientX,e.clientY);
 }
 function endLineDrag(e){
   if(!drag||(e&&e.pointerId!==drag.id))return;
-  clearTimeout(drag.hold);const was=drag.on,idx=drag.idx,fine=!drag.touch;drag=null;
+  clearTimeout(drag.hold);const was=drag.on;drag=null;
   document.removeEventListener('pointermove',moveLineDrag);document.removeEventListener('pointerup',endLineDrag);document.removeEventListener('pointercancel',endLineDrag);
   map.dragging.enable();
-  if(was){S.noClickUntil=Date.now()+450;clearTimeout(rt);drawPoints();snapVia(idx,fine,true).then(ok=>{if(ok)changed()})}
+  if(was){S.noClickUntil=Date.now()+450;liveEnd()}
 }
 map.on('click',e=>{
   if(S.mode!=='draw'||Date.now()<(S.noClickUntil||0))return;$('results').hidden=true;

@@ -9,6 +9,7 @@ How it works for the person using it:
 
 1. Set where you are starting (your location by default) and where you are going. The fastest route appears.
 2. Drag the orange line onto the roads you want. On a phone, press and hold the line first, then drag.
+   The route re-draws continuously while you drag, about three times a second.
    Where you let go, the route snaps to a road, and larger roads are favoured: a drop near a main road lands
    on it instead of on the side street or car park beside it. Freeways get no such favour.
    Or tap **Avoid a road** and tap any road you would rather not drive on; the route moves off it.
