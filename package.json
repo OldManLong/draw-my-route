@@ -1,0 +1,14 @@
+{
+  "name": "draw-my-route",
+  "private": true,
+  "description": "Draw your own driving route, then open it in Google Maps or Apple Maps.",
+  "scripts": {
+    "serve": "node tests/serve.js",
+    "test": "node tests/run.js",
+    "test:offline": "node tests/run.js --offline",
+    "test:live": "node tests/run.js --live"
+  },
+  "devDependencies": {
+    "playwright": "^1.50.0"
+  }
+}

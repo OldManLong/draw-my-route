@@ -29,3 +29,21 @@ They are fine for personal and light use but are rate-limited and come with no u
 If the site gets real traffic, switch to a provider with a free tier meant for apps.
 
 Map data © OpenStreetMap contributors. Leaflet is included under its BSD 2-Clause licence (see `LEAFLET-LICENSE.txt`).
+
+## Testing
+
+The `tests/` folder holds an automated test suite. It starts a private copy of the site on this computer only
+(`127.0.0.1`, unreachable from outside), opens it in an emulated iPhone, and drives it the way a person would.
+
+Setup, once: install Node.js, then run `npm install` and `npx playwright install chromium` in this folder.
+
+- `npm run test:offline` fakes every outside service and checks the app's own logic in a few seconds:
+  loading, tapping, link building, share links, search, and what happens when the routing service fails.
+- `npm run test:live` uses the real map, routing and search services. It draws a set of real routes
+  (short, detour, loop, highway, surface streets, Manhattan one-ways, London) and checks each result three ways:
+  the app's predicted match, an independent re-measurement of it, and a second router's opinion of the same stops.
+- `npm test` runs both. Screenshots and `report.json` land in `tests/output/`.
+- `npm run serve` just runs the private copy at http://127.0.0.1:8123/ so you can click around yourself.
+
+A warning in the live tests means the app's links work by its own prediction but a second router took a different road,
+which is the best available hint that Google Maps or Apple Maps might too.

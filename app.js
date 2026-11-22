@@ -63,13 +63,18 @@ function interDist(ll){const xy=ixy(ll),ci=Math.floor(xy[0]/INTER.cell),cj=Math.
 
 /* ---------------- Routers ---------------- */
 /* Hosted: public OSRM (OpenStreetMap) driving router. */
+/* Fetch JSON from a routing service: plain-language errors, and a few spaced retries when it says it is busy. */
+async function getJSON(url,tries=0){
+  let r;try{r=await fetch(url)}catch(e){throw new Error("Can't reach the routing service. Check your connection and try again.")}
+  if(r.status===429){if(tries>=3)throw new Error('The routing service is busy right now. Wait a minute and try again.');await sleep(1500*(tries+1));return getJSON(url,tries+1)}
+  try{return await r.json()}catch(e){throw new Error('The routing service is having trouble. Try again in a minute.')}
+}
 let lastCall=0;
 async function osrmRoute(pts){
   const wait=lastCall+350-Date.now();if(wait>0)await sleep(wait);lastCall=Date.now();
   const s=pts.map(p=>p[1].toFixed(6)+','+p[0].toFixed(6)).join(';');
-  const r=await fetch(`https://router.project-osrm.org/route/v1/driving/${s}?overview=full&geometries=geojson&steps=true`);
-  if(r.status===429){await sleep(1500);return osrmRoute(pts)}
-  const j=await r.json();if(j.code!=='Ok')throw new Error(j.message||'No route found');
+  const j=await getJSON(`https://router.project-osrm.org/route/v1/driving/${s}?overview=full&geometries=geojson&steps=true`);
+  if(j.code!=='Ok')throw new Error(j.code==='NoRoute'||j.code==='NoSegment'?'No drivable route between two of your points.':(j.message||'No route found'));
   const rt=j.routes[0];
   let hwy=false;
   rt.legs.forEach(l=>l.steps.forEach(st=>(st.intersections||[]).forEach(i=>{if((i.bearings||[]).length>=3)addInter([i.location[1],i.location[0]]);if((i.classes||[]).includes('motorway'))hwy=true})));
@@ -83,9 +88,8 @@ function dec6(s){const pts=[];let i=0,la=0,lo=0;const d=()=>{let r=0,sh=0,b;do{b
 async function valhallaRoute(pts){
   const wait=lastV+1100-Date.now();if(wait>0)await sleep(wait);lastV=Date.now();
   const q={locations:pts.map(p=>({lat:+p[0].toFixed(6),lon:+p[1].toFixed(6),type:'break'})),costing:'auto',costing_options:{auto:{use_highways:0}},directions_options:{units:'kilometers'}};
-  const r=await fetch('https://valhalla1.openstreetmap.de/route?json='+encodeURIComponent(JSON.stringify(q)));
-  if(r.status===429){await sleep(2000);return valhallaRoute(pts)}
-  const j=await r.json();if(!j.trip)throw new Error(j.error||'No route found');
+  const j=await getJSON('https://valhalla1.openstreetmap.de/route?json='+encodeURIComponent(JSON.stringify(q)));
+  if(!j.trip)throw new Error(j.error||'No route found');
   let coords=[];j.trip.legs.forEach(l=>{const c=dec6(l.shape);coords=coords.length?coords.concat(c.slice(1)):c});
   return {coords,distance:j.trip.summary.length*1000,duration:j.trip.summary.time};
 }
@@ -254,7 +258,7 @@ if(DEMO){
     return cv}});
   new DemoLayer({maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
 }else{
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
   if(navigator.geolocation&&!location.hash.startsWith('#r='))navigator.geolocation.getCurrentPosition(p=>{if(!S.pts.length)map.setView([p.coords.latitude,p.coords.longitude],14)},()=>{},{timeout:6000});
 }
 
@@ -472,4 +476,7 @@ function openViewer(){
 if(!DEMO&&location.hash.startsWith('#r=')&&openViewer()){}else{render();
   if(DEMO&&DEMO.sample){S.pts=DEMO.sample.slice();S.zones=(DEMO.sampleZones||[]).slice();drawZones();S.fitNext=true;changed();}
 }
+
+/* Handle for the automated tests in tests/ (not used by the app itself). */
+window.DMR={map,S,route,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
 })();
