@@ -29,7 +29,18 @@ function bulgingValhalla(route, u) {
   return valhallaAnswer(route, out);
 }
 
-function fakeServices({ osrm, valhalla } = {}) {
+/* "Which road is near here?" By default only the spot itself. With bigRoadLocate there is also a main road running
+   east-west along latitude 43.0130, and the nearest small street is 11 m south of wherever you ask. */
+const BIG_ROAD_LAT = 43.0130;
+const edge = (lat, lon, metres, cls, name) => ({ correlated_lat: lat, correlated_lon: lon, distance: metres, edge: { classification: { classification: cls } }, edge_info: { names: name ? [name] : [] } });
+function plainLocate(route, u) { return json(route, valhallaQuery(u).locations.map(l => ({ edges: l.search_filter ? [] : [edge(l.lat, l.lon, 0, 'residential', '')] }))); }
+function bigRoadLocate(route, u) {
+  return json(route, valhallaQuery(u).locations.map(l => ({ edges: [l.search_filter
+    ? edge(BIG_ROAD_LAT, l.lon, Math.abs(l.lat - BIG_ROAD_LAT) * 110540, l.search_filter.min_road_class, 'Big Road')
+    : edge(l.lat - 0.0001, l.lon, 11, 'residential', 'Side Street')] })));
+}
+
+function fakeServices({ osrm, valhalla, locate } = {}) {
   return route => {
     const u = route.request().url();
     if (u.includes('tile.openstreetmap.org')) return route.fulfill({ body: PNG, contentType: 'image/png' });
@@ -38,6 +49,7 @@ function fakeServices({ osrm, valhalla } = {}) {
       const pts = u.split('/driving/')[1].split('?')[0].split(';').map(s => s.split(',').map(Number));
       return json(route, { code: 'Ok', routes: [{ distance: 1000, duration: 100, geometry: { coordinates: pts }, legs: [{ steps: [{ intersections: [] }] }] }] });
     }
+    if (u.includes('valhalla') && u.includes('/locate')) return (locate || plainLocate)(route, u);
     if (u.includes('valhalla')) {
       if (valhallaPts(u).length > 10) return json(route, { error_code: 150, error: 'Exceeded max locations: 10' }, 400); // the real public server's limit
       if (valhallaQuery(u).exclude_locations) return valhallaAnswer(route, aroundMarks(valhallaPts(u)));
@@ -279,6 +291,40 @@ module.exports = async function offline(browser, url) {
     await page.waitForFunction(() => window.DMR.S.pts.length === 3 && window.DMR.S.desired && !window.DMR.S.busy, null, { timeout: 8000 });
     const pin = await page.evaluate(() => { const D = window.DMR, p = D.map.latLngToContainerPoint(D.S.pts[1]); return [p.x, p.y]; });
     t.check(Math.abs(pin[0] - m[0]) < 8 && Math.abs(pin[1] - (m[1] - 70)) < 8, `pin ended at ${Math.round(pin[0])},${Math.round(pin[1])}, expected ${m[0]},${m[1] - 70}`);
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Dropping the line near a main road lands on the main road; far from one it stays where you put it', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ locate: bigRoadLocate }) });
+    await drawRoute(page, [A, B]); await page.waitForTimeout(600);
+    const px = ll => page.evaluate(ll => { const p = window.DMR.map.latLngToContainerPoint(ll); return [p.x, p.y]; }, ll);
+    const pull = async (from, to) => { await page.mouse.move(from[0], from[1]); await page.mouse.down(); for (let i = 1; i <= 6; i++) await page.mouse.move(from[0] + (to[0] - from[0]) * i / 6, from[1] + (to[1] - from[1]) * i / 6, { steps: 2 }); await page.mouse.up(); };
+    const lonMid = (A[1] + B[1]) / 2, start = await px([A[0], lonMid]), road = await px([BIG_ROAD_LAT, lonMid]);
+    // let go 12 px short of the main road: it should jump onto it
+    await pull(start, [road[0], road[1] + 12]);
+    await page.waitForFunction(() => window.DMR.S.pts.length === 3 && window.DMR.S.pts[1].snapped && !window.DMR.S.busy && window.DMR.S.desired.coords.length === 3, null, { timeout: 8000 });
+    let pin = await page.evaluate(() => window.DMR.S.pts[1]);
+    t.check(Math.abs(pin[0] - BIG_ROAD_LAT) < 1e-6, `pin landed at latitude ${pin[0].toFixed(5)}, not on the main road at ${BIG_ROAD_LAT}`);
+    t.check((await page.textContent('#toast')).includes('Big Road'), 'user was not told which road the pin landed on');
+    // drag that pin well away from the main road (100 px south): it should stay by the small street there
+    const from = await px(pin), far = [from[0] + 30, from[1] + 100];
+    await page.mouse.move(from[0], from[1]); await page.mouse.down(); for (let i = 1; i <= 6; i++) await page.mouse.move(from[0] + 5 * i, from[1] + 100 * i / 6, { steps: 2 }); await page.mouse.up();
+    await page.waitForFunction(lat => window.DMR.S.pts.length === 3 && window.DMR.S.pts[1].snapped && Math.abs(window.DMR.S.pts[1][0] - lat) > 1e-4 && !window.DMR.S.busy, BIG_ROAD_LAT, { timeout: 8000 });
+    pin = await page.evaluate(() => window.DMR.S.pts[1]); const at = await px(pin);
+    t.check(Math.abs(at[1] - far[1]) < 8, `pin ended ${Math.round(Math.abs(at[1] - far[1]))} px from where it was dropped, expected to stay put`);
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Road lookup unavailable: the pin simply stays where it was dropped', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ locate: route => route.abort() }) });
+    await drawRoute(page, [A, B]); await page.waitForTimeout(600);
+    const mid = await page.evaluate(([a, b]) => { const p = window.DMR.map.latLngToContainerPoint([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); return [p.x, p.y]; }, [A, B]);
+    await page.mouse.move(mid[0], mid[1]); await page.mouse.down(); for (let i = 1; i <= 6; i++) await page.mouse.move(mid[0], mid[1] - 10 * i, { steps: 2 }); await page.mouse.up();
+    await page.waitForFunction(() => window.DMR.S.pts.length === 3 && window.DMR.S.desired && !window.DMR.S.busy && window.DMR.S.desired.coords.length === 3, null, { timeout: 8000 });
+    const at = await page.evaluate(() => { const p = window.DMR.map.latLngToContainerPoint(window.DMR.S.pts[1]); return [p.x, p.y]; });
+    t.check(Math.abs(at[1] - (mid[1] - 60)) < 6, 'pin moved even though no road information was available');
     t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
   });

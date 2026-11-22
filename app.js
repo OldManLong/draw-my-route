@@ -314,7 +314,8 @@ function drawPoints(){
   if(S.mode!=='draw')return;
   S.pts.forEach((p,i)=>{const last=i===S.pts.length-1&&i>0;
     const m=L.marker(p,{draggable:true,icon:pinIcon(i===0?'A':last?'B':i,i===0?'start':last?'end':'mid'),zIndexOffset:500}).addTo(map);
-    m.on('dragend',e=>{const ll=e.target.getLatLng();S.pts[i]=[ll.lat,ll.lng];if(i===0)S.fromLabel='';else if(last)S.toLabel='';changed()});
+    m.on('dragend',e=>{const ll=e.target.getLatLng();S.pts[i]=[ll.lat,ll.lng];if(i===0)S.fromLabel='';else if(last)S.toLabel='';
+      if(i>0&&!last)snapVia(i,finePointer(),true).then(ok=>{if(ok)changed()});else changed()});
     m.on('click',()=>{const div=document.createElement('div');div.className='pop';div.innerHTML=`<b>${i===0?'Start':last?'Destination':'Your route goes through here'}</b><button class="btn small danger">Remove</button>`;
       div.querySelector('button').onclick=()=>{map.closePopup();removePt(i);changed()};m.bindPopup(div,{closeButton:false}).openPopup()});
     S.markers.push(m)});
@@ -378,6 +379,45 @@ async function recompute(){
   if(S.fitNext&&S.desired){S.fitNext=false;fitRoute(S.desired.coords)}
 }
 
+/* ---------------- Snap to roads, favouring larger ones ---------------- */
+/* Where a dragged or tapped route pin lands. The nearest road of any size is always a candidate, but main roads get a
+   head start measured in screen pixels (a finger is imprecise), so dropping near a main road lands on it instead
+   of on the alley or car park beside it. Freeways and ramps get no head start: you only land on one by aiming at it. */
+const SNAP_TIERS=[
+  {name:'main',  head:30, reach:70, filter:{min_road_class:'primary', max_road_class:'trunk',exclude_ramp:true}},   // arterials and highways that are not freeways
+  {name:'medium',head:18, reach:45, filter:{min_road_class:'tertiary',max_road_class:'trunk',exclude_ramp:true}},   // collector roads
+  {name:'any',   head:0,  reach:Infinity, filter:null},
+];
+async function snapToRoad(ll,fine){
+  const raw={ll,name:'',tier:'none'};
+  if(DEMO)return raw;
+  const mpp=40075016.686*Math.cos(ll[0]*Math.PI/180)/(256*2**map.getZoom()),k=fine?0.55:1;   // a mouse is more precise than a finger
+  const at={lat:+ll[0].toFixed(6),lon:+ll[1].toFixed(6)};
+  const q={locations:SNAP_TIERS.map(t=>t.filter?{...at,search_filter:t.filter}:at),costing:'auto',verbose:true};
+  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),3000);
+  try{
+    const r=await fetch('https://valhalla1.openstreetmap.de/locate?json='+encodeURIComponent(JSON.stringify(q)),{signal:ctl.signal});
+    if(!r.ok)return raw;
+    const j=await r.json();let best=null;
+    SNAP_TIERS.forEach((t,i)=>{const e=j[i]&&j[i].edges&&j[i].edges[0];if(!e||typeof e.distance!=='number')return;
+      const px=e.distance/mpp;if(px>t.reach*k||(t.filter&&e.distance>1500))return;
+      const score=px-t.head*k;if(!best||score<best.score)best={score,ll:[e.correlated_lat,e.correlated_lon],name:(e.edge_info&&e.edge_info.names&&e.edge_info.names[0])||'',tier:t.name}});
+    return best||raw;
+  }catch(e){return raw}
+  finally{clearTimeout(timer)}
+}
+/* Snap route pin number idx. Returns false if the pin moved again while we were asking. */
+async function snapVia(idx,fine,announce){
+  const before=S.pts[idx];if(!before||before.snapped)return true;
+  if(!before.asking)before.asking=snapToRoad(before,fine);              // a drop right after a pause shares the one request
+  const s=await before.asking;
+  if(S.pts[idx]===before){const ll=[s.ll[0],s.ll[1]];ll.snapped=true;S.pts[idx]=ll}
+  else if(!S.pts[idx]||!S.pts[idx].snapped)return false;
+  if(announce&&s.tier!=='any'&&s.tier!=='none'&&s.name)toast('On '+s.name,1600);
+  return true;
+}
+const finePointer=()=>!matchMedia('(pointer:coarse)').matches;
+
 /* ---------------- Drag the line ---------------- */
 /* Mouse: press the line and pull. Touch: press and hold the line for a moment (so panning the map still works), then pull.
    The spot you grabbed becomes a pin the route must pass through; pins can be dragged again or removed. */
@@ -408,14 +448,15 @@ function moveLineDrag(e){
   e.preventDefault();
   const p=map.containerPointToLatLng(map.mouseEventToContainerPoint(e));
   S.pts[drag.idx]=[p.lat,p.lng];if(S.markers[drag.idx])S.markers[drag.idx].setLatLng(p);
-  clearTimeout(rt);rt=setTimeout(recompute,300);                       // re-route whenever the pull pauses
+  const idx=drag.idx,fine=!drag.touch;
+  clearTimeout(rt);rt=setTimeout(async()=>{if(await snapVia(idx,fine,false))recompute()},300);   // re-route whenever the pull pauses
 }
 function endLineDrag(e){
   if(!drag||(e&&e.pointerId!==drag.id))return;
-  clearTimeout(drag.hold);const was=drag.on;drag=null;
+  clearTimeout(drag.hold);const was=drag.on,idx=drag.idx,fine=!drag.touch;drag=null;
   document.removeEventListener('pointermove',moveLineDrag);document.removeEventListener('pointerup',endLineDrag);document.removeEventListener('pointercancel',endLineDrag);
   map.dragging.enable();
-  if(was){S.noClickUntil=Date.now()+450;changed()}
+  if(was){S.noClickUntil=Date.now()+450;clearTimeout(rt);drawPoints();snapVia(idx,fine,true).then(ok=>{if(ok)changed()})}
 }
 map.on('click',e=>{
   if(S.mode!=='draw'||Date.now()<(S.noClickUntil||0))return;$('results').hidden=true;
@@ -424,7 +465,8 @@ map.on('click',e=>{
   let idx=S.pts.length;
   if(S.pts.length>=2&&!$('t-end')?.checked){let best=hav(S.pts[S.pts.length-1],p);
     for(let i=0;i<S.pts.length-1;i++){const add=hav(S.pts[i],p)+hav(p,S.pts[i+1])-hav(S.pts[i],S.pts[i+1]);if(add<best){best=add;idx=i+1}}}
-  S.pts.splice(idx,0,p);changed();
+  S.pts.splice(idx,0,p);
+  if(S.pts.length>2&&idx>0&&idx<S.pts.length-1){drawPoints();snapVia(idx,finePointer(),true).then(ok=>{if(ok)changed()})}else changed();
 });
 
 /* ---------------- Build links ---------------- */
@@ -582,5 +624,5 @@ if(!DEMO&&location.hash.startsWith('#r=')&&openViewer()){}else{render();
 }
 
 /* Handle for the automated tests in tests/ (not used by the app itself). */
-window.DMR={map,S,LEVELS,setEnd,fitRoute,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
+window.DMR={map,S,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
 })();

@@ -98,6 +98,16 @@ module.exports = async function live(browser, url) {
     await ctx.close();
   });
 
+  await S.test('Snapping favours the larger road: a drop between a car-park lane and a through street lands on the street', async t => {
+    const { ctx, page } = await openApp(browser, url);
+    // Downtown Waukesha: this spot is 6 m from a service lane and about 16 m from North Barstow Street.
+    const out = await page.evaluate(async () => { const D = window.DMR; D.map.setView([43.0125, -88.2290], 16, { animate: false }); const coarse = await D.snapToRoad([43.0125, -88.2290], false), fine = await D.snapToRoad([43.0125, -88.2290], true); return { coarse, fine }; });
+    t.note(`finger: "${out.coarse.name}" (${out.coarse.tier}); mouse: "${out.fine.name}" (${out.fine.tier})`);
+    t.check(out.coarse.tier !== 'none', 'road lookup did not answer');
+    t.check(out.coarse.name === 'North Barstow Street' && out.coarse.tier === 'medium', `expected to land on North Barstow Street, got "${out.coarse.name}" (${out.coarse.tier})`);
+    await ctx.close();
+  });
+
   await S.test('Real search finds a named place', async t => {
     const { ctx, page } = await openApp(browser, url);
     await page.fill('#q-to', 'Frame Park Waukesha');
