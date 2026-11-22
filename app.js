@@ -93,15 +93,15 @@ let lastV=0;
 function dec6(s){const pts=[];let i=0,la=0,lo=0;const d=()=>{let r=0,sh=0,b;do{b=s.charCodeAt(i++)-63;r|=(b&0x1f)<<sh;sh+=5}while(b>=0x20);return r&1?~(r>>1):r>>1};
   while(i<s.length){la+=d();lo+=d();pts.push([la/1e6,lo/1e6])}return pts}
 const VALHALLA_MAX=10;                                // the public server refuses requests with more than 10 points
-async function valhallaRoute(pts,avoid=true){
+async function valhallaRoute(pts,avoid=true,exclude=null){
   if(pts.length>VALHALLA_MAX){                        // every point is a full stop, so routing in overlapping pieces gives the same answer
     let coords=[],distance=0,duration=0;
-    for(let i=0;i<pts.length-1;i+=VALHALLA_MAX-1){const r=await valhallaRoute(pts.slice(i,i+VALHALLA_MAX),avoid);
+    for(let i=0;i<pts.length-1;i+=VALHALLA_MAX-1){const r=await valhallaRoute(pts.slice(i,i+VALHALLA_MAX),avoid,exclude);
       coords=coords.length?coords.concat(r.coords.slice(1)):r.coords;distance+=r.distance;duration+=r.duration}
     return {coords,distance,duration};
   }
   const wait=lastV+1100-Date.now();if(wait>0)await sleep(wait);lastV=Date.now();
-  const q={locations:pts.map(p=>({lat:+p[0].toFixed(6),lon:+p[1].toFixed(6),type:'break'})),costing:'auto',...(avoid?{costing_options:{auto:{use_highways:0}}}:{}),directions_options:{units:'kilometers'}};
+  const q={locations:pts.map(p=>({lat:+p[0].toFixed(6),lon:+p[1].toFixed(6),type:'break'})),costing:'auto',...(avoid?{costing_options:{auto:{use_highways:0}}}:{}),...(exclude&&exclude.length?{exclude_locations:exclude.map(z=>({lat:+z[0].toFixed(6),lon:+z[1].toFixed(6)}))}:{}),directions_options:{units:'kilometers'}};
   const j=await getJSON('https://valhalla1.openstreetmap.de/route?json='+encodeURIComponent(JSON.stringify(q)));
   if(!j.trip)throw new Error(j.error||'No route found');
   let coords=[];j.trip.legs.forEach(l=>{const c=dec6(l.shape);coords=coords.length?coords.concat(c.slice(1)):c});
@@ -301,11 +301,11 @@ if(DEMO){
   new DemoLayer({maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
 }else{
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
-  if(navigator.geolocation&&!location.hash.startsWith('#r='))navigator.geolocation.getCurrentPosition(p=>{if(!S.pts.length)map.setView([p.coords.latitude,p.coords.longitude],14)},()=>{},{timeout:6000});
+  if(navigator.geolocation&&!location.hash.startsWith('#r='))navigator.geolocation.getCurrentPosition(p=>{if(!S.pts.length&&S.mode==='draw')setEnd('from',[p.coords.latitude,p.coords.longitude],'My location')},()=>{},{timeout:6000});
 }
 
 /* ---------------- State ---------------- */
-const S={mode:'draw',pts:[],snap:true,desired:null,markers:[],line:null,busy:0,result:null,resLayers:[],level:load('dmr.level','few'),tool:'route',zones:[],zoneLayers:[],strict:false,fromHere:load('wps.fromHere',false),name:''};
+const S={mode:'draw',pts:[],snap:true,desired:null,markers:[],line:null,busy:0,result:null,resLayers:[],level:load('dmr.level','few'),tool:'route',zones:[],zoneLayers:[],strict:false,fromHere:load('wps.fromHere',false),name:'',note:'',fromLabel:'',toLabel:'',toWait:null,grab:null};
 const sheet=$('sheet');
 
 function pinIcon(label,cls){return L.divIcon({className:'',html:`<div class="pin ${cls}">${label}</div>`,iconSize:[26,26],iconAnchor:[13,13]})}
@@ -314,10 +314,33 @@ function drawPoints(){
   if(S.mode!=='draw')return;
   S.pts.forEach((p,i)=>{const last=i===S.pts.length-1&&i>0;
     const m=L.marker(p,{draggable:true,icon:pinIcon(i===0?'A':last?'B':i,i===0?'start':last?'end':'mid'),zIndexOffset:500}).addTo(map);
-    m.on('dragend',e=>{const ll=e.target.getLatLng();S.pts[i]=[ll.lat,ll.lng];changed()});
-    m.on('click',()=>{const div=document.createElement('div');div.className='pop';div.innerHTML=`<b>Point ${i===0?'A (start)':last?'B (end)':i}</b><button class="btn small danger">Remove point</button>`;
-      div.querySelector('button').onclick=()=>{map.closePopup();S.pts.splice(i,1);changed()};m.bindPopup(div,{closeButton:false}).openPopup()});
+    m.on('dragend',e=>{const ll=e.target.getLatLng();S.pts[i]=[ll.lat,ll.lng];if(i===0)S.fromLabel='';else if(last)S.toLabel='';changed()});
+    m.on('click',()=>{const div=document.createElement('div');div.className='pop';div.innerHTML=`<b>${i===0?'Start':last?'Destination':'Your route goes through here'}</b><button class="btn small danger">Remove</button>`;
+      div.querySelector('button').onclick=()=>{map.closePopup();removePt(i);changed()};m.bindPopup(div,{closeButton:false}).openPopup()});
     S.markers.push(m)});
+}
+function removePt(i){const n=S.pts.length;
+  if(i===0){S.fromLabel=n===2?S.toLabel:'';if(n===2)S.toLabel=''}else if(i===n-1)S.toLabel='';
+  S.pts.splice(i,1)}
+/* From / To boxes */
+function syncEnds(){const n=S.pts.length,f=$('q-from'),t=$('q-to');if(!f||!t)return;
+  if(document.activeElement!==f)f.value=n?S.fromLabel||'Pin on map':'';
+  if(document.activeElement!==t)t.value=n>1?S.toLabel||'Pin on map':S.toWait?S.toWait.label:''}
+function setEnd(which,ll,label){
+  if(S.mode!=='draw')editRoute();
+  if(which==='from'){S.fromLabel=label;
+    if(S.pts.length)S.pts[0]=ll;else{S.pts.push(ll);if(S.toWait){S.pts.push(S.toWait.ll);S.toLabel=S.toWait.label;S.toWait=null}}}
+  else{
+    if(!S.pts.length){S.toWait={ll,label};syncEnds();map.setView(ll,14);toast('Now set where you are starting from.');return}
+    S.toLabel=label;if(S.pts.length===1)S.pts.push(ll);else S.pts[S.pts.length-1]=ll}
+  if(S.pts.length<2)map.setView(ll,15);else S.fitNext=true;
+  changed();
+}
+function useMyLocation(){
+  if(!navigator.geolocation){toast('This browser cannot share your location.');return}
+  toast('Finding your location…');
+  navigator.geolocation.getCurrentPosition(p=>{toast('Starting from your location');setEnd('from',[p.coords.latitude,p.coords.longitude],'My location')},
+    ()=>toast('Could not get your location. Type a starting place or tap the map.',4000),{timeout:8000});
 }
 const ZONE_R=40;
 function drawZones(){
@@ -326,29 +349,78 @@ function drawZones(){
   S.zones.forEach((z,i)=>{
     S.zoneLayers.push(L.circle(z,{radius:ZONE_R,color:css('--danger'),weight:2,fillColor:css('--danger'),fillOpacity:.22,interactive:false}).addTo(map));
     const m=L.marker(z,{icon:pinIcon('✕','avoid'),interactive:editable,zIndexOffset:400}).addTo(map);
-    if(editable)m.on('click',()=>{const div=document.createElement('div');div.className='pop';div.innerHTML='<b>Stay off this road</b><button class="btn small danger">Remove</button>';
-      div.querySelector('button').onclick=()=>{map.closePopup();S.zones.splice(i,1);drawZones();render()};m.bindPopup(div,{closeButton:false}).openPopup()});
+    if(editable)m.on('click',()=>{const div=document.createElement('div');div.className='pop';div.innerHTML='<b>Avoiding this road</b><button class="btn small danger">Remove</button>';
+      div.querySelector('button').onclick=()=>{map.closePopup();S.zones.splice(i,1);drawZones();changed()};m.bindPopup(div,{closeButton:false}).openPopup()});
     S.zoneLayers.push(m)});
 }
-let rt;function changed(){drawPoints();clearTimeout(rt);rt=setTimeout(recompute,200);render()}
+let rt;function changed(){drawPoints();syncEnds();clearTimeout(rt);rt=setTimeout(recompute,200);render()}
+function clearLine(){if(S.line){map.removeLayer(S.line);S.line=null}if(S.grab){map.removeLayer(S.grab);S.grab=null}}
 async function recompute(){
-  if(S.line){map.removeLayer(S.line);S.line=null}
-  if(S.pts.length<2){S.desired=null;render();return}
+  if(S.pts.length<2){clearLine();S.desired=null;render();return}
   const id=++S.busy;render();
   try{let r;
-    if(S.snap)r=await route(S.pts);
-    else{let d=0;for(let i=1;i<S.pts.length;i++)d+=hav(S.pts[i-1],S.pts[i]);r={coords:S.pts.slice(),distance:d,duration:d/13}}
+    if(!S.snap){let d=0;for(let i=1;i<S.pts.length;i++)d+=hav(S.pts[i-1],S.pts[i]);r={coords:S.pts.slice(),distance:d,duration:d/13}}
+    else if(S.zones.length&&!DEMO){
+      // Roads marked ✕: ask the engine that can keep off given spots. If it can't answer, fall back and say so.
+      try{r=await valhallaRoute(S.pts,false,S.zones)}
+      catch(e){r=await route(S.pts);if(id===S.busy)toast("Couldn't route around your ✕ marks just now. Drag the line off those roads instead.",4500)}}
+    else r=await route(S.pts);
     if(id!==S.busy)return;S.desired=r;
   }catch(e){if(id!==S.busy)return;S.desired=null;toast(e.message||'Could not fit your route to roads.')}
-  S.busy=0;
-  if(S.desired)S.line=L.polyline(S.desired.coords,{color:css('--drawn'),weight:7,opacity:.95}).addTo(map);
+  S.busy=0;clearLine();
+  if(S.desired){
+    S.line=L.polyline(S.desired.coords,{color:css('--drawn'),weight:7,opacity:.95,interactive:false}).addTo(map);
+    if(S.snap){ // wide invisible strip over the line, so it is easy to grab
+      S.grab=L.polyline(S.desired.coords,{color:'#000',weight:34,opacity:0,interactive:true}).addTo(map);
+      const el=S.grab.getElement();if(el){el.style.cursor='grab';el.style.touchAction='none';el.addEventListener('pointerdown',startLineDrag)}}
+  }
   render();
   if(S.fitNext&&S.desired){S.fitNext=false;fitRoute(S.desired.coords)}
 }
+
+/* ---------------- Drag the line ---------------- */
+/* Mouse: press the line and pull. Touch: press and hold the line for a moment (so panning the map still works), then pull.
+   The spot you grabbed becomes a pin the route must pass through; pins can be dragged again or removed. */
+let drag=null;
+function nearestVertex(ll){const c=S.desired.coords,k=Math.cos(ll[0]*Math.PI/180);let b=0,bd=Infinity;
+  for(let i=0;i<c.length;i++){const d=(c[i][0]-ll[0])**2+((c[i][1]-ll[1])*k)**2;if(d<bd){bd=d;b=i}}return b}
+function startLineDrag(e){
+  if(drag||S.mode!=='draw'||S.tool!=='route'||!S.desired||(e.pointerType==='mouse'&&e.button!==0))return;
+  drag={id:e.pointerId,x:e.clientX,y:e.clientY,on:false,idx:-1,hold:0,touch:e.pointerType!=='mouse'};
+  if(drag.touch)drag.hold=setTimeout(engageLineDrag,230);else e.stopPropagation();
+  document.addEventListener('pointermove',moveLineDrag,{passive:false});document.addEventListener('pointerup',endLineDrag);document.addEventListener('pointercancel',endLineDrag);
+}
+function engageLineDrag(){
+  if(!drag||drag.on||!S.desired)return;
+  drag.on=true;drag.hold=0;map.dragging.disable();
+  const p=map.containerPointToLatLng(map.mouseEventToContainerPoint({clientX:drag.x,clientY:drag.y})),ll=[p.lat,p.lng],v=nearestVertex(ll);
+  let idx=1;for(let k=1;k<S.pts.length-1;k++)if(nearestVertex(S.pts[k])<v)idx++;
+  S.pts.splice(idx,0,ll);drag.idx=idx;drawPoints();
+  if(navigator.vibrate)try{navigator.vibrate(10)}catch(err){}
+}
+function moveLineDrag(e){
+  if(!drag||e.pointerId!==drag.id)return;
+  if(!drag.on){
+    if(Math.hypot(e.clientX-drag.x,e.clientY-drag.y)<=8)return;
+    if(drag.touch){endLineDrag(e);return}                             // finger moved before the hold: it is a map pan
+    engageLineDrag();
+  }
+  e.preventDefault();
+  const p=map.containerPointToLatLng(map.mouseEventToContainerPoint(e));
+  S.pts[drag.idx]=[p.lat,p.lng];if(S.markers[drag.idx])S.markers[drag.idx].setLatLng(p);
+  clearTimeout(rt);rt=setTimeout(recompute,300);                       // re-route whenever the pull pauses
+}
+function endLineDrag(e){
+  if(!drag||(e&&e.pointerId!==drag.id))return;
+  clearTimeout(drag.hold);const was=drag.on;drag=null;
+  document.removeEventListener('pointermove',moveLineDrag);document.removeEventListener('pointerup',endLineDrag);document.removeEventListener('pointercancel',endLineDrag);
+  map.dragging.enable();
+  if(was){S.noClickUntil=Date.now()+450;changed()}
+}
 map.on('click',e=>{
-  if(S.mode!=='draw')return;$('results').hidden=true;
+  if(S.mode!=='draw'||Date.now()<(S.noClickUntil||0))return;$('results').hidden=true;
   const p=[e.latlng.lat,e.latlng.lng];
-  if(S.tool==='avoid'){S.zones.push(p);drawZones();render();return}
+  if(S.tool==='avoid'){S.zones.push(p);drawZones();changed();return}
   let idx=S.pts.length;
   if(S.pts.length>=2&&!$('t-end')?.checked){let best=hav(S.pts[S.pts.length-1],p);
     for(let i=0;i<S.pts.length-1;i++){const add=hav(S.pts[i],p)+hav(p,S.pts[i+1])-hav(S.pts[i],S.pts[i+1]);if(add<best){best=add;idx=i+1}}}
@@ -362,21 +434,15 @@ async function build(){
   try{
     const lv=LEVELS[S.level]||LEVELS.few;
     const second=!DEMO&&lv.second?pts=>valhallaRoute(pts,false):null;        // second opinion: a different routing engine, normal driving settings
-    const base={maxStops:40,maxGap:lv.maxGap,zones:S.zones,zoneR:ZONE_R,strict:S.strict,second};
+    const base={maxStops:40,maxGap:lv.maxGap,zones:S.zones,zoneR:ZONE_R,strict:S.strict||S.pts.length>2,second};
     const prog=pre=>(n,two)=>{const el=$('prog');if(el)el.textContent=two?`Double-checking with a second routing engine (${n} stop${n===1?'':'s'} so far)…`:pre+(n?`testing with ${n} stop${n>1?'s':''}…`:'testing the fastest route…')};
     const res=await findStops(S.desired.coords,base,prog('Google and Apple: '));
-    const ok=r=>r.avoidOnly?r.crossed===0:r.match>=0.97;
-    let pick=res;
-    if(S.level==='few'&&res.stops.length>0&&S.desired.hwy===false){
-      try{const av=await findStops(S.desired.coords,{...base,second:null,avoid:true,maxStops:Math.max(0,res.stops.length-1)},prog('With Avoid highways: '));
-        if(ok(av)&&(av.stops.length<res.stops.length||!ok(res)))pick=av;}
-      catch(e){/* keep the regular plan */}
-    }
+    const pick=res;
     pick.level=S.level;S.result=pick;S.mode='result';showResult();render();fitRoute(S.desired.coords);return;
-  }catch(e){toast(e.message||'Something went wrong. Try again.');S.mode='draw';drawPoints();if(S.desired&&!S.line)S.line=L.polyline(S.desired.coords,{color:css('--drawn'),weight:7}).addTo(map)}
+  }catch(e){toast(e.message||'Something went wrong. Try again.');S.mode='draw';drawPoints()}
   render();
 }
-function fitRoute(coords){if(!coords||coords.length<2)return;const h=sheet.offsetHeight;map.fitBounds(L.latLngBounds(coords),{paddingTopLeft:[28,84],paddingBottomRight:[28,h+20],maxZoom:17})}
+function fitRoute(coords){if(!coords||coords.length<2)return;const h=sheet.offsetHeight;map.fitBounds(L.latLngBounds(coords),{paddingTopLeft:[28,130],paddingBottomRight:[28,h+20],maxZoom:17})}
 function clearResult(){S.resLayers.forEach(l=>map.removeLayer(l));S.resLayers=[]}
 function showResult(){
   clearResult();const r=S.result;if(!r)return;
@@ -396,23 +462,22 @@ async function copyText(text,btn){
 function flash(btn,t){if(!btn)return;const o=btn.textContent;btn.textContent=t;setTimeout(()=>btn.textContent=o,1600)}
 function shareLink(){
   const r=S.result;const simp=simplify(S.desired.coords.map(P),6).map(U);
-  const data={v:1,n:S.name||'',o:r.origin.map(x=>+x.toFixed(6)),d:r.dest.map(x=>+x.toFixed(6)),s:r.stops.map(s=>s.map(x=>+x.toFixed(6))),z:S.zones.map(s=>s.map(x=>+x.toFixed(5))),...(r.avoid?{aa:1}:{}),p:encPoly(simp),m:+r.match.toFixed(3)};
+  const data={v:1,n:S.name||'',o:r.origin.map(x=>+x.toFixed(6)),d:r.dest.map(x=>+x.toFixed(6)),s:r.stops.map(s=>s.map(x=>+x.toFixed(6))),z:S.zones.map(s=>s.map(x=>+x.toFixed(5))),...(r.avoid?{aa:1}:{}),...(S.note.trim()?{t:S.note.trim().slice(0,140)}:{}),p:encPoly(simp),m:+r.match.toFixed(3)};
   return location.href.split('#')[0]+'#r='+b64u.enc(JSON.stringify(data));
 }
 
 /* ---------------- Search ---------------- */
-let qT;
-$('q').addEventListener('input',e=>{$('qclear').hidden=!e.target.value;clearTimeout(qT);const v=e.target.value.trim();if(v.length<2){$('results').hidden=true;return}qT=setTimeout(()=>search(v),DEMO?50:450)});
-$('q').addEventListener('keydown',e=>{if(e.key==='Enter'){clearTimeout(qT);search(e.target.value.trim())}});
-$('qclear').onclick=()=>{$('q').value='';$('qclear').hidden=true;$('results').hidden=true};
-let tempMarker=null;
+let qT,qWhich='to';
+for(const [id,which] of [['q-from','from'],['q-to','to']]){const el=$(id);
+  el.addEventListener('input',e=>{qWhich=which;clearTimeout(qT);const v=e.target.value.trim();if(v.length<2){$('results').hidden=true;return}qT=setTimeout(()=>search(v),DEMO?50:450)});
+  el.addEventListener('keydown',e=>{if(e.key==='Enter'){qWhich=which;clearTimeout(qT);search(e.target.value.trim())}});
+  el.addEventListener('focus',()=>{qWhich=which;el.select()});
+  el.addEventListener('blur',()=>setTimeout(syncEnds,300));}
+$('b-loc').onclick=useMyLocation;
 function showHits(hits){const el=$('results');el.innerHTML='';
   if(!hits.length)el.innerHTML='<button disabled>No matches. Try a street or place name.</button>';
   hits.slice(0,8).forEach(h=>{const b=document.createElement('button');b.innerHTML=`${esc(h.name)}<small>${esc(h.sub||'')}</small>`;
-    b.onclick=()=>{el.hidden=true;$('q').blur();map.setView(h.ll,16);if(tempMarker)map.removeLayer(tempMarker);
-      const div=document.createElement('div');div.className='pop';div.innerHTML=`<b>${esc(h.name)}</b><button class="btn small primary">Add to my route</button>`;
-      div.querySelector('button').onclick=()=>{map.removeLayer(tempMarker);tempMarker=null;if(S.mode!=='draw')editRoute();S.pts.push(h.ll);changed()};
-      tempMarker=L.marker(h.ll,{icon:pinIcon('＋','split')}).addTo(map).bindPopup(div,{closeButton:false}).openPopup()};el.appendChild(b)});
+    b.onclick=()=>{el.hidden=true;$('q-from').blur();$('q-to').blur();setEnd(qWhich,h.ll,h.name)};el.appendChild(b)});
   el.hidden=false}
 async function search(q){
   if(!q)return;
@@ -435,28 +500,20 @@ function editRoute(){clearResult();S.result=null;S.mode='draw';drawPoints();draw
 function render(){
   const m=S.mode;$('top').hidden=m==='viewer';
   if(m==='draw'){
-    const R=S.desired,n=S.pts.length;
-    const nz=S.zones.length,av=S.tool==='avoid';
-    sheet.innerHTML=`<h2>${av?'Mark roads to stay off':'Draw your route'}</h2>
-      <div class="seg" role="tablist"><button id="tool-route" role="tab" aria-selected="${!av}" class="${av?'':'on'}">Route points</button><button id="tool-avoid" role="tab" aria-selected="${av}" class="${av?'on':''}">Stay off${nz?` (${nz})`:''}</button></div>
-      <p class="sub">${av?(n<2?'Draw your route first, then come back here.':'Tap each road you want to stay off, right where Google or Apple would send you. Tap a ✕ to remove it. Fewer marks means fewer stops.')
-        :n===0?'Tap the map where you want to start.':n===1?'Now tap where you want to end up.':'Tap to add a spot your route must pass through. Drag points to adjust; tap a point to remove it.'}</p>
-      ${R?`<div class="stats"><div><b>${fmtDist(R.distance)}</b><span>Distance</span></div><div><b>${fmtTime(R.duration)}</b><span>Drive time</span></div><div><b>${n}</b><span>Your points</span></div></div>`:''}
-      ${S.busy?'<p class="hint">Fitting your route to the roads…</p>':''}
-      <div class="row"><button class="btn primary" id="b-build" ${R&&!S.busy&&S.snap?'':'disabled'}>${nz?'Make share links (fewest stops)':'Make share links'}</button></div>
-      <details class="opts"><summary>Options</summary>
-        <label class="toggle"><input type="checkbox" id="t-snap" ${S.snap?'checked':''}> Follow roads between my points</label>
-        <label class="toggle"><input type="checkbox" id="t-end"> New points always go at the end</label>
-      </details>
-      <div class="row tools"><button class="btn small" id="b-undo" ${n?'':'disabled'}>↶ Undo</button><button class="btn small" id="b-rev" ${n>1?'':'disabled'}>⇅ Reverse</button><button class="btn small" id="b-clear" ${n?'':'disabled'}>Clear</button></div>
+    const R=S.desired,n=S.pts.length,nz=S.zones.length,av=S.tool==='avoid'&&n>=2,touch=matchMedia('(pointer:coarse)').matches;
+    if(!av)S.tool='route';
+    sheet.innerHTML=`<h2>${av?'Tap a road to avoid':n<2?'Where are you going?':'Shape your route'}</h2>
+      <p class="sub">${av?'Tap a road you would rather not drive on and the route moves off it. Tap a ✕ to undo.'
+        :n===0?'Set where you are starting from in the box above, or tap the map.':n===1?'Now set where you are going, in the box above or by tapping the map.'
+        :`${touch?'Press and hold the orange line, then drag it':'Drag the orange line'} onto the roads you want. Tap a pin to remove it.`}</p>
+      <p class="hint" id="tripline">${S.busy?'Fitting your route to the roads…':R?`<b>${fmtTime(R.duration)}</b> · ${fmtDist(R.distance)}${nz?` · ${nz} road${nz===1?'':'s'} avoided`:''}`:''}</p>
+      <div class="row"><button class="btn primary" id="b-build" ${R&&!S.busy&&S.snap?'':'disabled'}>Send to Google or Apple Maps</button></div>
+      <div class="row tools"><button class="btn small ${av?'primary':''}" id="b-avoid" ${n>1?'':'disabled'}>${av?'Done marking':'✕ Avoid a road'+(nz?` (${nz})`:'')}</button><button class="btn small" id="b-rev" ${n>1?'':'disabled'}>⇅ Reverse</button><button class="btn small" id="b-clear" ${n||S.toWait?'':'disabled'}>Clear</button></div>
       ${DEMO?'<p class="hint">Demo map: Waukesha, WI and I-94. The hosted version works anywhere.</p>':''}`;
     $('b-build').onclick=build;
-    $('tool-route').onclick=()=>{S.tool='route';render()};
-    $('tool-avoid').onclick=()=>{S.tool='avoid';render();if(S.pts.length>=2&&!S.zones.length)toast('Tap a road to mark it ✕')};
-    $('t-snap').onchange=e=>{S.snap=e.target.checked;recompute()};
-    $('b-undo').onclick=()=>{S.pts.pop();changed()};
-    $('b-rev').onclick=()=>{S.pts.reverse();changed()};
-    $('b-clear').onclick=()=>{S.pts=[];changed()};
+    $('b-avoid').onclick=()=>{S.tool=av?'route':'avoid';render()};
+    $('b-rev').onclick=()=>{S.pts.reverse();[S.fromLabel,S.toLabel]=[S.toLabel,S.fromLabel];changed()};
+    $('b-clear').onclick=()=>{S.pts=[];S.zones=[];S.fromLabel=S.toLabel='';S.toWait=null;S.tool='route';drawZones();changed()};
   }
   else if(m==='working'){
     sheet.innerHTML=`<h2>Finding your stops</h2><p class="sub" id="prog">Testing the fastest route…</p><p class="hint">Draw My Route checks the route Google and Apple would most likely pick, and adds a stop wherever it would leave your path.</p>`;
@@ -469,33 +526,35 @@ function render(){
         :(ns?'Google Maps and Apple Maps will route through these points in order, which keeps them on your path.':'The fastest route already follows your path, so the links just go from A to B.')}</p>
       ${r.avoidOnly?`<div class="match ${good?'good':'warn'}">${good?`<b>✓</b> Predicted to stay off ${r.zones===1?'the':'all'} ${nzs}`:`<b>${r.crossed}</b> marked spot${r.crossed===1?' is':'s are'} still on the predicted route. Draw your route around ${r.crossed===1?'it':'them'}.`}</div>`
         :`<div class="match ${good?'good':'warn'}"><b>${pct}%</b> predicted match with your route${good?'':'. Try moving one of your points onto a main road, or add a point where the dashed line strays.'}</div>`}
-      <div class="legend"><span><i></i>Your drawing</span><span><i class="pred"></i>Predicted drive in Google/Apple</span>${r.zones?'<span><i class="x"></i>Stay off</span>':''}</div>
+      <div class="legend"><span><i></i>Your drawing</span><span><i class="pred"></i>Predicted drive in Google/Apple</span>${r.zones?'<span><i class="x"></i>Road to avoid</span>':''}</div>
       <div class="seg" role="tablist" aria-label="How many stops">${Object.keys(LEVELS).map(k=>`<button role="tab" data-level="${k}" aria-selected="${S.level===k}" class="${S.level===k?'on':''}">${LEVELS[k].label}</button>`).join('')}</div>
       <p class="hint">${(LEVELS[S.level]||LEVELS.few).note}${r.checked==='failed'?' The second routing engine was unavailable just now, so this was checked with one engine only.':''}</p>
       ${r.blocked?`<p class="hint">${r.blocked} ✕ ${r.blocked===1?'is':'are'} on your own route, so ${r.blocked===1?'it was':'they were'} ignored.</p>`:''}
       ${parts.length>1?`<p class="hint" style="margin:0 0 8px">Your route needs more than ${PART_MAX} stops, so it's split into ${parts.length} parts. Open part 2 when you reach the end of part 1 (⇥).</p>`:''}
       ${linkBlocks(r)}
-      ${DEMO?'':`<div class="row"><button class="btn primary" id="b-share">Share one link for both</button></div>`}
+      ${DEMO?'':`<input class="field" id="f-note" maxlength="140" placeholder="Add a note for whoever gets this (optional)" aria-label="Note to include when sharing" value="${esc(S.note)}">
+      <div class="row"><button class="btn primary" id="b-share">Share this route</button></div>`}
       <div id="copybox" hidden><input class="field" id="copyfield" readonly aria-label="Link to copy"></div>
       <details class="opts"><summary>Options</summary>
-        ${S.zones.length?`<label class="toggle"><input type="checkbox" id="t-strict" ${S.strict?'checked':''}> Follow my whole drawn route exactly (more stops)</label>`:''}
+        ${S.zones.length&&S.pts.length<=2?`<label class="toggle"><input type="checkbox" id="t-strict" ${S.strict?'checked':''}> Follow my whole drawn route exactly (more stops)</label>`:''}
         <label class="toggle"><input type="checkbox" id="t-here" ${S.fromHere?'checked':''}> Start from the driver's current location (your start becomes the first stop)</label>
       </details>
       <p class="hint">${ns?`Google and Apple treat each in-between point as a stop and will announce it. Just keep driving; if the app pauses, tap Continue or Resume. `:''}Apple Maps links need iOS 18.4 or later. Phone browsers without the Google Maps app only show the first 3 stops.</p>
       <div class="row" style="margin-top:8px"><button class="btn small" id="b-edit">Edit route</button><button class="btn small" id="b-new">New route</button></div>`;
     sheet.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{const k=b.dataset.copy,i=+k.slice(1),here=S.fromHere&&i===0;copyText(k[0]==='g'?googleLink(parts[i],here,r.avoid):appleLink(parts[i],here,r.avoid),b)});
+    if($('f-note'))$('f-note').oninput=e=>{S.note=e.target.value};
     if($('b-share'))$('b-share').onclick=async e=>{const link=shareLink();
-      if(navigator.share){try{await navigator.share({title:'My route',text:'Open this route in Google Maps or Apple Maps',url:link});return}catch(err){if(err.name==='AbortError')return}}
+      if(navigator.share){try{await navigator.share({title:'My route',text:S.note.trim()||'Open this route in Google Maps or Apple Maps',url:link});return}catch(err){if(err.name==='AbortError')return}}
       copyText(link,e.currentTarget)};
     $('t-here').onchange=e=>{S.fromHere=e.target.checked;store('wps.fromHere',S.fromHere);render()};
     sheet.querySelectorAll('[data-level]').forEach(b=>b.onclick=()=>{if(S.level===b.dataset.level)return;S.level=b.dataset.level;store('dmr.level',S.level);build()});
     if($('t-strict'))$('t-strict').onchange=e=>{S.strict=e.target.checked;build()};
     $('b-edit').onclick=editRoute;
-    $('b-new').onclick=()=>{S.pts=[];S.zones=[];S.tool='route';editRoute();changed()};
+    $('b-new').onclick=()=>{S.pts=[];S.zones=[];S.fromLabel=S.toLabel='';S.toWait=null;S.note='';S.tool='route';editRoute();changed()};
   }
   else if(m==='viewer'){
     const v=S.viewer,parts=splitParts(v.o,v.d,v.s);
-    sheet.innerHTML=`<h2>${esc(v.n||'Shared route')}</h2><p class="sub">Someone drew this route for you. Open it in your maps app and it will follow the orange line${v.s.length?` using ${v.s.length} in-between stop${v.s.length>1?'s':''}`:''}.</p>
+    sheet.innerHTML=`<h2>${esc(v.n||'Shared route')}</h2>${v.t?`<p class="note">${esc(String(v.t).slice(0,140))}</p>`:''}<p class="sub">Someone drew this route for you. Open it in your maps app and it will follow the orange line${v.s.length?` using ${v.s.length} in-between stop${v.s.length>1?'s':''}`:''}.</p>
       ${linkBlocks({origin:v.o,dest:v.d,stops:v.s,avoid:!!v.aa})}
       <label class="toggle"><input type="checkbox" id="t-here" ${S.fromHere?'checked':''}> Start from my current location</label>
       <p class="hint">${v.s.length?'The app will announce each in-between stop. Just keep driving; if it pauses, tap Continue or Resume. ':''}Apple Maps links need iOS 18.4 or later.</p>
@@ -523,5 +582,5 @@ if(!DEMO&&location.hash.startsWith('#r=')&&openViewer()){}else{render();
 }
 
 /* Handle for the automated tests in tests/ (not used by the app itself). */
-window.DMR={map,S,LEVELS,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
+window.DMR={map,S,LEVELS,setEnd,fitRoute,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
 })();

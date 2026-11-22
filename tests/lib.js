@@ -39,7 +39,7 @@ async function drawRoute(page, pts, zones = []) {
     const D = window.DMR;
     D.S.pts.length = 0; pts.forEach(p => D.S.pts.push(p));
     D.S.zones.length = 0; zones.forEach(z => D.S.zones.push(z));
-    D.S.desired = null; D.changed();
+    D.S.desired = null; D.S.fitNext = true; D.changed(); // fitNext: zoom so the whole route sits in the visible part of the map
   }, [pts, zones]);
   await page.waitForFunction(() => window.DMR.S.desired && !window.DMR.S.busy, null, { timeout: 60000 });
   return page.evaluate(() => { const d = window.DMR.S.desired; return { coords: d.coords, distance: d.distance, duration: d.duration, hwy: d.hwy }; });

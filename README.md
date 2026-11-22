@@ -1,7 +1,21 @@
 # Draw My Route
 
-Draw your own driving route on a map, then open it in Google Maps or Apple Maps.
-Draw My Route works out the fewest in-between stops needed to keep those apps on your route.
+Choose the way you want to drive, then open it in Google Maps or Apple Maps.
+
+It is for drivers who would rather not take the road their maps app picks for them, such as nervous drivers
+who want to keep off a particular highway or junction, and for telling someone else "go this way, because…".
+
+How it works for the person using it:
+
+1. Set where you are starting (your location by default) and where you are going. The fastest route appears.
+2. Drag the orange line onto the roads you want. On a phone, press and hold the line first, then drag.
+   Or tap **Avoid a road** and tap any road you would rather not drive on; the route moves off it.
+3. Tap **Send to Google or Apple Maps**. You can open the route yourself or share it, with a note, with someone else.
+
+Google and Apple do not accept a drawn route, so the site adds in-between stops that pull them onto yours.
+Stops are announced while driving, so by default it adds as few as possible.
+There is deliberately no blanket "avoid highways" switch: a quiet rural highway and an eight-lane interstate
+are very different roads, so you choose road by road instead.
 
 It is a static site: there is no server and no build step. Everything runs in the browser.
 
@@ -22,9 +36,10 @@ It is a static site: there is no server and no build step. Everything runs in th
 The page calls these free public services straight from the visitor's browser:
 
 - Map tiles: OpenStreetMap
-- Routing: the public OSRM demo server, plus the public Valhalla server as a second opinion.
-  Stops are only accepted when both engines follow the drawn route with them, because Google and Apple
-  each route differently and stops that convince a single engine are fragile.
+- Routing: the public OSRM demo server, plus the public Valhalla server, which routes around roads marked
+  to avoid and gives a second opinion at the Balanced and Most reliable levels.
+  At those levels stops are only accepted when both engines follow the drawn route with them, because Google
+  and Apple each route differently and stops that convince a single engine are fragile.
   The public Valhalla server takes at most 10 points per request, so long routes are checked in pieces.
 
 ## Stops levels
@@ -51,7 +66,8 @@ The `tests/` folder holds an automated test suite. It starts a private copy of t
 Setup, once: install Node.js, then run `npm install` and `npx playwright install chromium` in this folder.
 
 - `npm run test:offline` fakes every outside service and checks the app's own logic in a few seconds:
-  loading, tapping, link building, share links, search, and what happens when the routing service fails.
+  loading, From and To boxes, dragging the line by mouse and by touch, avoiding a road, link building,
+  share links and notes, and what happens when the routing service fails.
 - `npm run test:live` uses the real map, routing and search services. It draws a set of real routes
   (short, detour, loop, highway, surface streets, Manhattan one-ways, London) and checks each result three ways:
   the app's predicted match in both of its routing engines, an independent re-measurement of it, and the opinion of

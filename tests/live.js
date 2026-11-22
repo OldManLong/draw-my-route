@@ -77,28 +77,30 @@ module.exports = async function live(browser, url) {
     });
   }
 
-  await S.test('Stay-off mark keeps the predicted route away from a road', async t => {
+  await S.test('Avoid a road: marking a road on the fastest route moves the route off it, and the links keep off it', async t => {
     const { ctx, page, errors } = await openApp(browser, url);
-    // Find where the fastest library-to-airport route runs, mark its midpoint, then draw a route that goes around via the hospital.
     const fast = await drawRoute(page, [P.library, P.airport]);
     const mark = fast.coords[Math.floor(fast.coords.length / 2)];
-    const desired = await drawRoute(page, [P.library, P.hospital, P.airport], [mark]);
-    const onOwn = distToRouteM(mark, desired.coords);
+    const desired = await drawRoute(page, [P.library, P.airport], [mark]);
+    const drawnGap = distToRouteM(mark, desired.coords);
+    t.note(`fastest route ${(fast.distance / 1000).toFixed(1)} km; around the marked road ${(desired.distance / 1000).toFixed(1)} km, passing ${Math.round(drawnGap)} m from the mark`);
+    t.check(drawnGap > 40, `the drawn route still passes ${Math.round(drawnGap)} m from the marked road`);
     const r = await buildLinks(page);
     t.check(r, 'no result');
-    await page.waitForTimeout(1500); await page.screenshot({ path: path.join(OUT, 'live-stay-off.png') });
-    t.note(`mark is ${Math.round(onOwn)} m from the drawn route; ${r.stops.length} stop(s); heading "${r.heading}"`);
-    if (onOwn <= 40) { t.warn('the detour still passes the marked spot, so the app ignored the mark (scenario needs a different detour)'); await ctx.close(); return; }
+    await page.waitForTimeout(1500); await page.screenshot({ path: path.join(OUT, 'live-avoid.png') });
     const near = distToRouteM(mark, r.predicted);
-    t.check(r.avoidOnly, 'app did not switch to stay-off mode');
-    t.check(r.crossed === 0 && near > 40, `predicted route still passes ${Math.round(near)} m from the marked spot`);
+    t.note(`${r.stops.length} stop(s); "${r.heading}"`);
+    t.check(r.avoidOnly, 'app did not switch to avoid-only mode');
+    t.check(r.crossed === 0 && near > 40, `predicted route still passes ${Math.round(near)} m from the marked road`);
+    const out = await outsideOpinion(page, [r.origin, ...r.stops, r.dest]);
+    if (out) { const d = distToRouteM(mark, out); t.note(`outside engine passes ${Math.round(d)} m from the mark`); if (d <= 40) t.warn('an outside routing engine still uses the marked road with these stops'); }
     t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
   });
 
   await S.test('Real search finds a named place', async t => {
     const { ctx, page } = await openApp(browser, url);
-    await page.fill('#q', 'Frame Park Waukesha');
+    await page.fill('#q-to', 'Frame Park Waukesha');
     await page.waitForSelector('#results button', { timeout: 20000 });
     const first = await page.textContent('#results button');
     t.note('first result: ' + first.replace(/\s+/g, ' '));
