@@ -4,7 +4,7 @@
 //   2. an independent re-measurement of those matches (separate code, so it catches scoring mistakes),
 //   3. an outside judge: BRouter, an engine the app never uses, is given the same stops. If it also follows
 //      the drawn route, the stops are likely to hold up in maps apps that think differently from the app.
-// Each scenario also runs once with the second engine switched off, to show what the double-check buys.
+// Each scenario runs at all three stops levels (fewest, balanced, most reliable) so the trade-off is visible.
 const path = require('path');
 const { openApp, drawRoute, buildLinks, matchScore, distToRouteM, alongRoute, outsideOpinion, suite, OUT } = require('./lib');
 
@@ -18,14 +18,14 @@ const P = {
 };
 
 const SCENARIOS = [
-  { id: 'direct', title: 'Fastest route as drawn (library to Frame Park)', pts: [P.library, P.framePark], expectStops: [0, 12] },
-  { id: 'detour', title: 'One deliberate detour (library to Frame Park past the hospital)', pts: [P.library, P.hospital, P.framePark], expectStops: [1, 18] },
-  { id: 'scenic', title: 'Several must-pass places across town', pts: [P.grocery, P.carroll, P.courthouse, P.airport], expectStops: [1, 27] },
-  { id: 'loop', title: 'Loop that ends near where it starts', pts: [P.library, P.framePark, P.courthouse, P.hospital, P.carroll], expectStops: [1, 27] },
-  { id: 'highway', title: 'Longer trip where the fastest way is the highway (Waukesha to Brookfield)', pts: [P.library, P.brookfield], expectStops: [0, 12] },
-  { id: 'no-highway', title: 'Same trip drawn on surface streets instead of the highway', pts: [P.library, P.greenfieldAve, P.brookfield], expectStops: [0, 27] },
-  { id: 'manhattan', title: 'Dense one-way streets (Times Square to Union Square past the Empire State Building)', pts: [P.timesSq, P.empire, P.unionSq], expectStops: [0, 18] },
-  { id: 'london', title: 'Outside the US, driving on the left (London Eye to Tower Bridge past St Paul\'s)', pts: [P.londonEye, P.stPauls, P.towerBridge], expectStops: [0, 24] },
+  { id: 'direct', title: 'Fastest route as drawn (library to Frame Park)', pts: [P.library, P.framePark] },
+  { id: 'detour', title: 'One deliberate detour (library to Frame Park past the hospital)', pts: [P.library, P.hospital, P.framePark] },
+  { id: 'scenic', title: 'Several must-pass places across town', pts: [P.grocery, P.carroll, P.courthouse, P.airport] },
+  { id: 'loop', title: 'Loop that ends near where it starts', pts: [P.library, P.framePark, P.courthouse, P.hospital, P.carroll] },
+  { id: 'highway', title: 'Longer trip where the fastest way is the highway (Waukesha to Brookfield)', pts: [P.library, P.brookfield] },
+  { id: 'no-highway', title: 'Same trip drawn on surface streets instead of the highway', pts: [P.library, P.greenfieldAve, P.brookfield] },
+  { id: 'manhattan', title: 'Dense one-way streets (Times Square to Union Square past the Empire State Building)', pts: [P.timesSq, P.empire, P.unionSq] },
+  { id: 'london', title: 'Outside the US, driving on the left (London Eye to Tower Bridge past St Paul\'s)', pts: [P.londonEye, P.stPauls, P.towerBridge] },
 ];
 
 module.exports = async function live(browser, url) {
@@ -34,50 +34,46 @@ module.exports = async function live(browser, url) {
 
   for (const sc of SCENARIOS) {
     await S.test(sc.title, async t => {
-      // First the old way (one routing engine), as a baseline for comparison.
-      const one = await openApp(browser, url, { double: false });
-      await drawRoute(one.page, sc.pts);
-      const r1 = await buildLinks(one.page);
-      t.check(r1, 'no single-engine result: ' + (await one.page.textContent('#toast')));
-      const desired1 = await one.page.evaluate(() => window.DMR.S.desired.coords);
-      const out1 = await outsideOpinion(one.page, [r1.origin, ...r1.stops, r1.dest]);
-      const before = out1 ? matchScore(desired1, out1) : null;
-      await one.ctx.close();
-
-      // Then the default: stops must hold the route in two engines.
-      const { ctx, page, errors, calls } = await openApp(browser, url);
-      const t0 = Date.now();
-      const desired = await drawRoute(page, sc.pts);
-      const r = await buildLinks(page);
-      const secs = (Date.now() - t0) / 1000;
-      t.check(r, 'no result: ' + (await page.textContent('#toast')));
-      await page.waitForTimeout(1500);
-      await page.screenshot({ path: path.join(OUT, `live-${sc.id}.png`) });
-
+      const pct = x => x == null ? null : Math.round(x * 100);
+      const runs = {};
+      for (const level of ['few', 'balanced', 'most']) {
+        const { ctx, page, errors, calls } = await openApp(browser, url, { level });
+        const t0 = Date.now();
+        const desired = await drawRoute(page, sc.pts);
+        const r = await buildLinks(page);
+        const secs = (Date.now() - t0) / 1000;
+        t.check(r, `${level}: no result: ` + (await page.textContent('#toast')));
+        if (level === 'balanced') { await page.waitForTimeout(1500); await page.screenshot({ path: path.join(OUT, `live-${sc.id}.png`) }); }
+        const out = await outsideOpinion(page, [r.origin, ...r.stops, r.dest]);
+        runs[level] = { r, desired, errors, secs, calls: calls.osrm + calls.valhalla, outside: out ? matchScore(desired.coords, out) : null };
+        await ctx.close();
+      }
+      const { r, desired, errors, secs } = runs.balanced;
       const indep = matchScore(desired.coords, r.predicted), indep2 = r.predicted2 ? matchScore(desired.coords, r.predicted2) : null;
-      const out = await outsideOpinion(page, [r.origin, ...r.stops, r.dest]);
-      const after = out ? matchScore(desired.coords, out) : null;
       const offLine = r.stops.map(s => distToRouteM(s, desired.coords)), worstOff = Math.max(0, ...offLine);
       const order = r.stops.map(s => alongRoute(s, desired.coords));
-      const pct = x => x == null ? null : Math.round(x * 100);
-      const m = { id: sc.id, km: +(desired.distance / 1000).toFixed(1), stopsOneEngine: r1.stops.length, stops: r.stops.length, parts: r.parts.length, checked: r.checked, appMatch: Math.floor(r.match * 100), engine1: pct(r.score), engine2: pct(r.score2), remeasured1: pct(indep), remeasured2: pct(indep2), outsideBefore: pct(before), outsideAfter: pct(after), seconds: +secs.toFixed(1), routerCalls: calls.osrm + calls.valhalla };
+      const m = { id: sc.id, km: +(desired.distance / 1000).toFixed(1), checked: r.checked, appMatch: Math.floor(r.match * 100), engine1: pct(r.score), engine2: pct(r.score2), remeasured1: pct(indep), remeasured2: pct(indep2) };
+      for (const k of ['few', 'balanced', 'most']) m[k] = { stops: runs[k].r.stops.length, links: runs[k].r.parts.length, outside: pct(runs[k].outside), seconds: +runs[k].secs.toFixed(1), routerCalls: runs[k].calls };
       metrics.push(m);
-      t.note(`${m.km} km. Stops: ${m.stopsOneEngine} with one engine, ${m.stops} with two. App says ${m.appMatch}% (engines ${m.engine1}% / ${m.engine2 ?? 'n/a'}%). Outside judge: ${m.outsideBefore ?? 'n/a'}% before, ${m.outsideAfter ?? 'n/a'}% after. ${m.seconds}s, ${m.routerCalls} router calls.`);
+      const show = k => `${m[k].stops} stop${m[k].stops === 1 ? '' : 's'} / ${m[k].outside ?? 'n/a'}%`;
+      t.note(`${m.km} km. Stops / outside judge: fewest ${show('few')}, balanced ${show('balanced')}, most reliable ${show('most')}. Balanced took ${m.balanced.seconds}s and ${m.balanced.routerCalls} router calls; app says ${m.appMatch}%.`);
 
-      t.check(errors.length === 0, errors.join('; '));
-      if (r.checked !== 'two') t.warn('the second routing engine did not answer during this run, so the app fell back to one engine');
-      t.check(r.score >= 0.97, `first engine only follows ${m.engine1}% of the route`);
+      for (const k of ['few', 'balanced', 'most']) {
+        t.check(runs[k].errors.length === 0, `${k}: ` + runs[k].errors.join('; '));
+        t.check(runs[k].r.parts.every(p => p.w.length <= 9), `${k}: a link has more than 9 stops`);
+        t.check(runs[k].r.score >= 0.97, `${k}: first engine only follows ${pct(runs[k].r.score)}% of the route`);
+      }
+      t.check(m.few.stops <= m.balanced.stops && m.balanced.stops <= m.most.stops, 'stop counts do not rise with the level');
       t.check(indep >= 0.95, `app claims ${m.engine1}% for the first engine but re-measuring gives ${m.remeasured1}%`);
       t.check(indep2 == null || Math.abs(indep2 - r.score2) <= 0.06, `app claims ${m.engine2}% for the second engine but re-measuring gives ${m.remeasured2}%`);
-      t.check(r.stops.length >= sc.expectStops[0] && r.stops.length <= sc.expectStops[1], `expected ${sc.expectStops[0]}-${sc.expectStops[1]} stops, got ${r.stops.length}`);
       t.check(worstOff <= 15, `a stop sits ${Math.round(worstOff)} m off the drawn route`);
       t.check(order.every((a, i) => i === 0 || a >= order[i - 1] - 30), 'stops are not in driving order');
-      t.check(r.parts.every(p => p.w.length <= 9), 'a link has more than 9 stops');
       for (const g of r.google) { const u = new URL(g); t.check(u.searchParams.get('destination') && u.searchParams.get('origin'), 'Google link is missing a start or end'); }
+      if (r.checked !== 'two') t.warn('the second routing engine did not answer during this run, so the app fell back to one engine');
       if (r.match < 0.97) t.warn(`the two engines agree on only ${m.appMatch}% of the route even with stops`);
-      if (after != null && after < 0.9) t.warn(`an outside routing engine follows only ${m.outsideAfter}% of the drawn route with these stops`);
-      if (secs > 60) t.warn(`took ${m.seconds}s to make the links`);
-      await ctx.close();
+      if (runs.balanced.outside != null && runs.balanced.outside < 0.9) t.warn(`balanced: an outside routing engine follows only ${m.balanced.outside}% of the drawn route`);
+      if (runs.most.outside != null && runs.most.outside < 0.9) t.warn(`most reliable: an outside routing engine follows only ${m.most.outside}% of the drawn route`);
+      if (secs > 60) t.warn(`balanced took ${secs.toFixed(0)}s to make the links`);
     });
   }
 
@@ -122,3 +118,5 @@ module.exports = async function live(browser, url) {
   S.metrics = metrics;
   return S;
 };
+
+module.exports.SCENARIOS = SCENARIOS;

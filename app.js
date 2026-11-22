@@ -3,6 +3,13 @@
 (function(){
 'use strict';
 const DEMO = window.DMR_DEMO || null;          // embedded Waukesha map + road graph (offline demo build)
+/* How hard to pin the route down. More stops = more reliable, but more "arriving at stop" announcements.
+   second: also check the stops against a second routing engine. maxGap: longest stretch (metres) allowed without a stop. */
+const LEVELS = {
+  few:      {label:'Fewest stops',  second:false, maxGap:0,        note:'Only where the fastest route would leave yours. Best when the driver knows the way.'},
+  balanced: {label:'Balanced',      second:true,  maxGap:2000,  note:'Checked against two routing engines, with a stop at least every 2 km (1.2 mi).'},
+  most:     {label:'Most reliable', second:true,  maxGap:700,  note:'Checked against two routing engines, with a stop at least every 700 m (0.4 mi). Expect frequent announcements.'},
+};
 const PART_MAX = 9;                                // Google Maps URLs allow up to 9 waypoints
 const TOL = 22;                                    // meters: how close a route must be to count as "the same road"
 const $ = id => document.getElementById(id);
@@ -85,7 +92,14 @@ async function osrmRoute(pts){
 let lastV=0;
 function dec6(s){const pts=[];let i=0,la=0,lo=0;const d=()=>{let r=0,sh=0,b;do{b=s.charCodeAt(i++)-63;r|=(b&0x1f)<<sh;sh+=5}while(b>=0x20);return r&1?~(r>>1):r>>1};
   while(i<s.length){la+=d();lo+=d();pts.push([la/1e6,lo/1e6])}return pts}
+const VALHALLA_MAX=10;                                // the public server refuses requests with more than 10 points
 async function valhallaRoute(pts,avoid=true){
+  if(pts.length>VALHALLA_MAX){                        // every point is a full stop, so routing in overlapping pieces gives the same answer
+    let coords=[],distance=0,duration=0;
+    for(let i=0;i<pts.length-1;i+=VALHALLA_MAX-1){const r=await valhallaRoute(pts.slice(i,i+VALHALLA_MAX),avoid);
+      coords=coords.length?coords.concat(r.coords.slice(1)):r.coords;distance+=r.distance;duration+=r.duration}
+    return {coords,distance,duration};
+  }
   const wait=lastV+1100-Date.now();if(wait>0)await sleep(wait);lastV=Date.now();
   const q={locations:pts.map(p=>({lat:+p[0].toFixed(6),lon:+p[1].toFixed(6),type:'break'})),costing:'auto',...(avoid?{costing_options:{auto:{use_highways:0}}}:{}),directions_options:{units:'kilometers'}};
   const j=await getJSON('https://valhalla1.openstreetmap.de/route?json='+encodeURIComponent(JSON.stringify(q)));
@@ -201,7 +215,7 @@ async function findStops(desiredLL, opts, onProgress){
   const addStop=(i0,i1)=>{const cands=placeIn(i0,i1),i=cands[0];dirty=true;
     stops.push({i,ll:U(D.pts[i]),along:D.along[i],cands,k:0});stops.sort((a,b)=>a.along-b.along)};
   let E=[],phase2=false;
-  while(iter++<maxIter){
+  const converge=async()=>{while(iter++<maxIter){
     onProgress&&onProgress(stops.length,phase2);
     E=await evalAll(true);
     const ev=E.find(e=>!e.ok);
@@ -231,13 +245,19 @@ async function findStops(desiredLL, opts, onProgress){
     if(!s)break;
     dirty=true;
     s.k++;if(s.k<Math.min(s.cands.length,6)){s.i=s.cands[s.k];s.ll=U(D.pts[s.i]);s.along=D.along[s.i]}else stops.splice(stops.indexOf(s),1);
-  }
-  // Optional safety stops: break up long stretches where Google or Apple might pick a different road than OSM routing does.
-  if(opts.safety&&!avoidOnly&&E.length&&E[0].score>=0.95){let added=0;
-    while(stops.length<opts.maxStops&&added<4){const anchors=[0,...stops.map(s=>s.along),D.len];let gi=-1,gl=0;
-      for(let i=1;i<anchors.length;i++){const g=anchors[i]-anchors[i-1];if(g>gl){gl=g;gi=i}}
-      if(gl<2000)break;const m=(anchors[gi-1]+anchors[gi])/2;let i0=D.along.findIndex(a=>a>=m-250),i1=D.along.findIndex(a=>a>=m+250);if(i1<0)i1=D.pts.length-1;
-      addStop(i0,i1);added++}}
+  }};
+  /* Spacing: on a long stretch with no stop, a maps app is free to pick its own road. With opts.maxGap, add evenly
+     spaced stops so no stretch between stops is longer than that many metres. */
+  const space=()=>{if(!opts.maxGap||avoidOnly)return 0;
+    const anchors=[0,...stops.map(s=>s.along),D.len],plan=[];let added=0;
+    for(let i=1;i<anchors.length;i++){const g=anchors[i]-anchors[i-1];if(g<=opts.maxGap)continue;const n=Math.ceil(g/opts.maxGap)-1;
+      for(let k=1;k<=n;k++)plan.push({m:anchors[i-1]+g*k/(n+1),w:Math.min(150,g/(n+1)/4)})}
+    for(const {m,w} of plan){if(stops.length>=opts.maxStops)break;
+      let i0=D.along.findIndex(a=>a>=m-w),i1=D.along.findIndex(a=>a>=m+w);if(i0<0)continue;if(i1<0)i1=D.pts.length-1;
+      addStop(i0,i1);added++}
+    return added};
+  await converge();
+  for(let round=0;round<3&&space();round++)await converge();        // spacing stops can need a little tidying themselves
   if(dirty||E.length<routers.length){onProgress&&onProgress(stops.length,routers.length>1);E=await evalAll(false)}
   const first=E.find(e=>!e.R.second),sec=E.find(e=>e.R.second)||null;
   const crossedBy=e=>Z.filter(z=>e.C.pts.some(p=>hyp(p,z.p)<=ZR)).length;
@@ -285,7 +305,7 @@ if(DEMO){
 }
 
 /* ---------------- State ---------------- */
-const S={mode:'draw',pts:[],snap:true,desired:null,markers:[],line:null,busy:0,result:null,resLayers:[],safety:load('wps.safety2',false),double:load('dmr.double',true),tool:'route',zones:[],zoneLayers:[],strict:false,fromHere:load('wps.fromHere',false),name:''};
+const S={mode:'draw',pts:[],snap:true,desired:null,markers:[],line:null,busy:0,result:null,resLayers:[],level:load('dmr.level','balanced'),tool:'route',zones:[],zoneLayers:[],strict:false,fromHere:load('wps.fromHere',false),name:''};
 const sheet=$('sheet');
 
 function pinIcon(label,cls){return L.divIcon({className:'',html:`<div class="pin ${cls}">${label}</div>`,iconSize:[26,26],iconAnchor:[13,13]})}
@@ -340,18 +360,19 @@ async function build(){
   if(!S.desired)return;
   S.mode='working';render();
   try{
-    const second=!DEMO&&S.double?pts=>valhallaRoute(pts,false):null;        // second opinion: a different routing engine, normal driving settings
-    const base={maxStops:40,safety:S.safety,zones:S.zones,zoneR:ZONE_R,strict:S.strict,second};
+    const lv=LEVELS[S.level]||LEVELS.balanced;
+    const second=!DEMO&&lv.second?pts=>valhallaRoute(pts,false):null;        // second opinion: a different routing engine, normal driving settings
+    const base={maxStops:40,maxGap:lv.maxGap,zones:S.zones,zoneR:ZONE_R,strict:S.strict,second};
     const prog=pre=>(n,two)=>{const el=$('prog');if(el)el.textContent=two?`Double-checking with a second routing engine (${n} stop${n===1?'':'s'} so far)…`:pre+(n?`testing with ${n} stop${n>1?'s':''}…`:'testing the fastest route…')};
     const res=await findStops(S.desired.coords,base,prog('Google and Apple: '));
     const ok=r=>r.avoidOnly?r.crossed===0:r.match>=0.97;
     let pick=res;
-    if(!second&&res.stops.length>0&&S.desired.hwy===false){
-      try{const av=await findStops(S.desired.coords,{...base,second:null,avoid:true,safety:false,maxStops:Math.max(0,res.stops.length-1)},prog('With Avoid highways: '));
+    if(S.level==='few'&&res.stops.length>0&&S.desired.hwy===false){
+      try{const av=await findStops(S.desired.coords,{...base,second:null,avoid:true,maxStops:Math.max(0,res.stops.length-1)},prog('With Avoid highways: '));
         if(ok(av)&&(av.stops.length<res.stops.length||!ok(res)))pick=av;}
       catch(e){/* keep the regular plan */}
     }
-    S.result=pick;S.mode='result';showResult();render();fitRoute(S.desired.coords);return;
+    pick.level=S.level;S.result=pick;S.mode='result';showResult();render();fitRoute(S.desired.coords);return;
   }catch(e){toast(e.message||'Something went wrong. Try again.');S.mode='draw';drawPoints();if(S.desired&&!S.line)S.line=L.polyline(S.desired.coords,{color:css('--drawn'),weight:7}).addTo(map)}
   render();
 }
@@ -449,7 +470,8 @@ function render(){
       ${r.avoidOnly?`<div class="match ${good?'good':'warn'}">${good?`<b>✓</b> Predicted to stay off ${r.zones===1?'the':'all'} ${nzs}`:`<b>${r.crossed}</b> marked spot${r.crossed===1?' is':'s are'} still on the predicted route. Draw your route around ${r.crossed===1?'it':'them'}.`}</div>`
         :`<div class="match ${good?'good':'warn'}"><b>${pct}%</b> predicted match with your route${good?'':'. Try moving one of your points onto a main road, or add a point where the dashed line strays.'}</div>`}
       <div class="legend"><span><i></i>Your drawing</span><span><i class="pred"></i>Predicted drive in Google/Apple</span>${r.zones?'<span><i class="x"></i>Stay off</span>':''}</div>
-      ${r.checked==='two'?'<p class="hint">Checked against two different routing engines.</p>':r.checked==='failed'?'<p class="hint">The second routing engine was unavailable, so this was checked with one engine only.</p>':''}
+      <div class="seg" role="tablist" aria-label="How many stops">${Object.keys(LEVELS).map(k=>`<button role="tab" data-level="${k}" aria-selected="${S.level===k}" class="${S.level===k?'on':''}">${LEVELS[k].label}</button>`).join('')}</div>
+      <p class="hint">${(LEVELS[S.level]||LEVELS.balanced).note}${r.checked==='failed'?' The second routing engine was unavailable just now, so this was checked with one engine only.':''}</p>
       ${r.blocked?`<p class="hint">${r.blocked} ✕ ${r.blocked===1?'is':'are'} on your own route, so ${r.blocked===1?'it was':'they were'} ignored.</p>`:''}
       ${parts.length>1?`<p class="hint" style="margin:0 0 8px">Your route needs more than ${PART_MAX} stops, so it's split into ${parts.length} parts. Open part 2 when you reach the end of part 1 (⇥).</p>`:''}
       ${linkBlocks(r)}
@@ -458,8 +480,6 @@ function render(){
       <details class="opts"><summary>Options</summary>
         ${S.zones.length?`<label class="toggle"><input type="checkbox" id="t-strict" ${S.strict?'checked':''}> Follow my whole drawn route exactly (more stops)</label>`:''}
         <label class="toggle"><input type="checkbox" id="t-here" ${S.fromHere?'checked':''}> Start from the driver's current location (your start becomes the first stop)</label>
-        ${DEMO?'':`<label class="toggle"><input type="checkbox" id="t-double" ${S.double?'checked':''}> Double-check with a second routing engine (more reliable, slower, may add stops)</label>`}
-        ${r.avoidOnly?'':`<label class="toggle"><input type="checkbox" id="t-safe" ${S.safety?'checked':''}> Add backup stops on long stretches (more reliable, more announcements)</label>`}
       </details>
       <p class="hint">${ns?`Google and Apple treat each in-between point as a stop and will announce it. Just keep driving; if the app pauses, tap Continue or Resume. `:''}Apple Maps links need iOS 18.4 or later. Phone browsers without the Google Maps app only show the first 3 stops.</p>
       <div class="row" style="margin-top:8px"><button class="btn small" id="b-edit">Edit route</button><button class="btn small" id="b-new">New route</button></div>`;
@@ -468,8 +488,7 @@ function render(){
       if(navigator.share){try{await navigator.share({title:'My route',text:'Open this route in Google Maps or Apple Maps',url:link});return}catch(err){if(err.name==='AbortError')return}}
       copyText(link,e.currentTarget)};
     $('t-here').onchange=e=>{S.fromHere=e.target.checked;store('wps.fromHere',S.fromHere);render()};
-    if($('t-double'))$('t-double').onchange=e=>{S.double=e.target.checked;store('dmr.double',S.double);build()};
-    if($('t-safe'))$('t-safe').onchange=e=>{S.safety=e.target.checked;store('wps.safety2',S.safety);build()};
+    sheet.querySelectorAll('[data-level]').forEach(b=>b.onclick=()=>{if(S.level===b.dataset.level)return;S.level=b.dataset.level;store('dmr.level',S.level);build()});
     if($('t-strict'))$('t-strict').onchange=e=>{S.strict=e.target.checked;build()};
     $('b-edit').onclick=editRoute;
     $('b-new').onclick=()=>{S.pts=[];S.zones=[];S.tool='route';editRoute();changed()};
@@ -504,5 +523,5 @@ if(!DEMO&&location.hash.startsWith('#r=')&&openViewer()){}else{render();
 }
 
 /* Handle for the automated tests in tests/ (not used by the app itself). */
-window.DMR={map,S,route,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
+window.DMR={map,S,LEVELS,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
 })();

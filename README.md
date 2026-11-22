@@ -25,7 +25,17 @@ The page calls these free public services straight from the visitor's browser:
 - Routing: the public OSRM demo server, plus the public Valhalla server as a second opinion.
   Stops are only accepted when both engines follow the drawn route with them, because Google and Apple
   each route differently and stops that convince a single engine are fragile.
-  The double-check can be switched off under Options on the result screen.
+  The public Valhalla server takes at most 10 points per request, so long routes are checked in pieces.
+
+## Stops levels
+
+The result screen has a three-way control for how firmly the route is pinned down:
+
+- **Fewest stops**: one routing engine, stops only where the fastest route would leave the drawn one.
+- **Balanced** (default): two engines, plus a stop at least every 2 km so no long stretch is left to chance.
+- **Most reliable**: two engines, plus a stop at least every 700 m. Longer routes need several links (9 stops each).
+
+The spacings were chosen by trying 2 km, 1.2 km and 700 m on the live test routes and scoring each with an outside engine.
 - Search: Nominatim
 
 They are fine for personal and light use but are rate-limited and come with no uptime promise.
@@ -45,7 +55,7 @@ Setup, once: install Node.js, then run `npm install` and `npx playwright install
 - `npm run test:live` uses the real map, routing and search services. It draws a set of real routes
   (short, detour, loop, highway, surface streets, Manhattan one-ways, London) and checks each result three ways:
   the app's predicted match in both of its routing engines, an independent re-measurement of it, and the opinion of
-  an outside engine the app never uses (BRouter). Each route is also run with the double-check off for comparison.
+  an outside engine the app never uses (BRouter). Each route is run at all three stops levels.
 - `npm test` runs both. Screenshots and `report.json` land in `tests/output/`.
 - `npm run serve` just runs the private copy at http://127.0.0.1:8123/ so you can click around yourself.
 

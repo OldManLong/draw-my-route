@@ -35,7 +35,10 @@ function fakeServices({ osrm, valhalla } = {}) {
       const pts = u.split('/driving/')[1].split('?')[0].split(';').map(s => s.split(',').map(Number));
       return json(route, { code: 'Ok', routes: [{ distance: 1000, duration: 100, geometry: { coordinates: pts }, legs: [{ steps: [{ intersections: [] }] }] }] });
     }
-    if (u.includes('valhalla')) return valhalla ? valhalla(route, u) : valhallaAnswer(route, valhallaPts(u)); // by default the second engine agrees with the first
+    if (u.includes('valhalla')) {
+      if (valhallaPts(u).length > 10) return json(route, { error_code: 150, error: 'Exceeded max locations: 10' }, 400); // the real public server's limit
+      return valhalla ? valhalla(route, u) : valhallaAnswer(route, valhallaPts(u)); // by default the second engine agrees with the first
+    }
     if (u.includes('nominatim')) return json(route, [{ display_name: 'Frame Park, Waukesha, Wisconsin, USA', lat: '43.018', lon: '-88.224' }]);
     return route.abort();
   };
@@ -81,8 +84,8 @@ module.exports = async function offline(browser, url) {
     await ctx.close();
   });
 
-  await S.test('Straight route needs no stops; bent route gets a stop on the bend', async t => {
-    const { ctx, page } = await openApp(browser, url, { mock: fakeServices() });
+  await S.test('Fewest stops: straight route needs none; bent route gets a stop on the bend', async t => {
+    const { ctx, page } = await openApp(browser, url, { mock: fakeServices(), level: 'few' });
     await drawRoute(page, [A, B]);
     let r = await buildLinks(page);
     t.check(r && r.stops.length === 0 && r.score >= 0.99, `straight route: ${r && r.stops.length} stops, score ${r && r.score}`);
@@ -97,10 +100,10 @@ module.exports = async function offline(browser, url) {
   });
 
   await S.test('Second engine disagrees: extra stops are added until both engines follow the route', async t => {
-    const one = await openApp(browser, url, { mock: fakeServices({ valhalla: bulgingValhalla }), double: false });
+    const one = await openApp(browser, url, { mock: fakeServices({ valhalla: bulgingValhalla }), level: 'few' });
     await drawRoute(one.page, [A, B]);
     const r1 = await buildLinks(one.page);
-    t.check(r1.stops.length === 0 && r1.checked === 'one', `with the double-check off expected 0 stops, got ${r1.stops.length}`);
+    t.check(r1.stops.length === 0 && r1.checked === 'one', `at the fewest-stops level expected 0 stops, got ${r1.stops.length}`);
     await one.ctx.close();
     const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ valhalla: bulgingValhalla }) });
     await drawRoute(page, [A, B]);
@@ -109,7 +112,7 @@ module.exports = async function offline(browser, url) {
     t.check(r.checked === 'two', 'second engine was not consulted');
     t.check(r.stops.length >= 1 && r.stops.length <= 6, `expected 1-6 stops, got ${r.stops.length}`);
     t.check(r.score >= 0.97 && r.score2 >= 0.97, 'stops did not bring both engines onto the route');
-    t.check((await page.textContent('#sheet')).includes('two different routing engines'), 'result does not say it was double-checked');
+    t.check((await page.textContent('#sheet')).includes('two routing engines'), 'result does not say it was double-checked');
     t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
   });
@@ -125,15 +128,46 @@ module.exports = async function offline(browser, url) {
     await ctx.close();
   });
 
-  await S.test('Double-check can be switched off in Options and the choice is remembered', async t => {
-    const { ctx, page } = await openApp(browser, url, { mock: fakeServices({ valhalla: bulgingValhalla }) });
-    await drawRoute(page, [A, B]);
-    await buildLinks(page);
-    await page.click('details.opts summary'); await page.uncheck('#t-double');
-    await page.waitForFunction(() => window.DMR.S.mode === 'result' && window.DMR.S.result.checked === 'one', null, { timeout: 15000 });
-    t.check(await page.evaluate(() => window.DMR.S.result.stops.length) === 0, 'stops remained after switching the double-check off');
+  await S.test('Three levels: more reliable means more stops, no stretch longer than the level allows, and the choice is remembered', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices() });
+    const FAR = [43.0100, -88.1800]; // about 4.9 km east of A, in a straight line
+    const metres = (a, b) => Math.hypot((b[0] - a[0]) * 110540, (b[1] - a[1]) * 111320 * Math.cos(a[0] * Math.PI / 180));
+    const levels = await page.evaluate(() => window.DMR.LEVELS);
+    await drawRoute(page, [A, FAR]);
+    let r = await buildLinks(page);
+    const seen = {};
+    const record = async key => {
+      r = await page.evaluate(() => { const x = window.DMR.S.result; return { level: x.level, origin: x.origin, dest: x.dest, stops: x.stops, match: x.match }; });
+      const pts = [r.origin, ...r.stops, r.dest], longest = Math.max(...pts.slice(1).map((p, i) => metres(pts[i], p)));
+      seen[key] = { stops: r.stops.length, longest: Math.round(longest) };
+      t.check(r.level === key, `expected level ${key}, got ${r.level}`);
+      t.check(r.match >= 0.97, `${key}: match fell to ${Math.round(r.match * 100)}%`);
+      if (levels[key].maxGap) t.check(longest <= levels[key].maxGap + 160, `${key}: a stretch of ${Math.round(longest)} m has no stop (limit ${levels[key].maxGap} m)`);
+    };
+    await record('balanced');
+    for (const key of ['most', 'few']) {
+      await page.click(`[data-level="${key}"]`);
+      await page.waitForFunction(k => window.DMR.S.mode === 'result' && window.DMR.S.result.level === k, key, { timeout: 30000 });
+      await record(key);
+    }
+    t.note(`stops: fewest ${seen.few.stops}, balanced ${seen.balanced.stops}, most reliable ${seen.most.stops}; longest stretch without a stop: ${seen.few.longest} / ${seen.balanced.longest} / ${seen.most.longest} m`);
+    t.check(seen.few.stops === 0, 'fewest-stops level added stops to a route that needs none');
+    t.check(seen.balanced.stops > seen.few.stops && seen.most.stops > seen.balanced.stops, 'stop counts do not rise with the level');
     await page.reload(); await page.waitForFunction(() => window.DMR);
-    t.check(await page.evaluate(() => window.DMR.S.double) === false, 'choice was not remembered after reload');
+    t.check(await page.evaluate(() => window.DMR.S.level) === 'few', 'choice was not remembered after reload');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Long route with many stops is still double-checked (second engine takes 10 points at a time)', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices(), level: 'most' });
+    await drawRoute(page, [A, [43.0100, -88.1200]]); // about 9.8 km in a straight line
+    const r = await buildLinks(page);
+    t.note(`${r.stops.length} stops in ${r.parts.length} links`);
+    t.check(r.stops.length > 10, `expected more than 10 stops, got ${r.stops.length}`);
+    t.check(r.checked === 'two' && r.score2 >= 0.97, 'second engine dropped out on a long route (' + r.checked + ')');
+    t.check(r.parts.length >= 2 && r.parts.every(p => p.w.length <= 9), 'links were not split correctly');
+    t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
   });
 
