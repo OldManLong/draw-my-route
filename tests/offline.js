@@ -105,7 +105,7 @@ module.exports = async function offline(browser, url) {
     const r1 = await buildLinks(one.page);
     t.check(r1.stops.length === 0 && r1.checked === 'one', `at the fewest-stops level expected 0 stops, got ${r1.stops.length}`);
     await one.ctx.close();
-    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ valhalla: bulgingValhalla }) });
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ valhalla: bulgingValhalla }), level: 'balanced' });
     await drawRoute(page, [A, B]);
     const r = await buildLinks(page);
     t.note(`${r.stops.length} stops; first engine ${Math.round(r.score * 100)}%, second ${Math.round(r.score2 * 100)}%`);
@@ -118,7 +118,7 @@ module.exports = async function offline(browser, url) {
   });
 
   await S.test('Second engine unavailable: links are still made and the user is told', async t => {
-    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ valhalla: route => route.abort() }) });
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ valhalla: route => route.abort() }), level: 'balanced' });
     await drawRoute(page, [A, MID, B]);
     const r = await buildLinks(page);
     t.check(r && r.checked === 'failed', 'expected a result marked as single-engine');
@@ -128,7 +128,7 @@ module.exports = async function offline(browser, url) {
     await ctx.close();
   });
 
-  await S.test('Three levels: more reliable means more stops, no stretch longer than the level allows, and the choice is remembered', async t => {
+  await S.test('Three levels: fewest stops by default, more reliable means more stops, no stretch longer than the level allows, and the choice is remembered', async t => {
     const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices() });
     const FAR = [43.0100, -88.1800]; // about 4.9 km east of A, in a straight line
     const metres = (a, b) => Math.hypot((b[0] - a[0]) * 110540, (b[1] - a[1]) * 111320 * Math.cos(a[0] * Math.PI / 180));
@@ -144,8 +144,8 @@ module.exports = async function offline(browser, url) {
       t.check(r.match >= 0.97, `${key}: match fell to ${Math.round(r.match * 100)}%`);
       if (levels[key].maxGap) t.check(longest <= levels[key].maxGap + 160, `${key}: a stretch of ${Math.round(longest)} m has no stop (limit ${levels[key].maxGap} m)`);
     };
-    await record('balanced');
-    for (const key of ['most', 'few']) {
+    await record('few'); // the default: as few stops as possible
+    for (const key of ['balanced', 'most']) {
       await page.click(`[data-level="${key}"]`);
       await page.waitForFunction(k => window.DMR.S.mode === 'result' && window.DMR.S.result.level === k, key, { timeout: 30000 });
       await record(key);
@@ -154,7 +154,7 @@ module.exports = async function offline(browser, url) {
     t.check(seen.few.stops === 0, 'fewest-stops level added stops to a route that needs none');
     t.check(seen.balanced.stops > seen.few.stops && seen.most.stops > seen.balanced.stops, 'stop counts do not rise with the level');
     await page.reload(); await page.waitForFunction(() => window.DMR);
-    t.check(await page.evaluate(() => window.DMR.S.level) === 'few', 'choice was not remembered after reload');
+    t.check(await page.evaluate(() => window.DMR.S.level) === 'most', 'choice was not remembered after reload');
     t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
   });

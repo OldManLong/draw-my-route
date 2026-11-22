@@ -305,7 +305,7 @@ if(DEMO){
 }
 
 /* ---------------- State ---------------- */
-const S={mode:'draw',pts:[],snap:true,desired:null,markers:[],line:null,busy:0,result:null,resLayers:[],level:load('dmr.level','balanced'),tool:'route',zones:[],zoneLayers:[],strict:false,fromHere:load('wps.fromHere',false),name:''};
+const S={mode:'draw',pts:[],snap:true,desired:null,markers:[],line:null,busy:0,result:null,resLayers:[],level:load('dmr.level','few'),tool:'route',zones:[],zoneLayers:[],strict:false,fromHere:load('wps.fromHere',false),name:''};
 const sheet=$('sheet');
 
 function pinIcon(label,cls){return L.divIcon({className:'',html:`<div class="pin ${cls}">${label}</div>`,iconSize:[26,26],iconAnchor:[13,13]})}
@@ -360,7 +360,7 @@ async function build(){
   if(!S.desired)return;
   S.mode='working';render();
   try{
-    const lv=LEVELS[S.level]||LEVELS.balanced;
+    const lv=LEVELS[S.level]||LEVELS.few;
     const second=!DEMO&&lv.second?pts=>valhallaRoute(pts,false):null;        // second opinion: a different routing engine, normal driving settings
     const base={maxStops:40,maxGap:lv.maxGap,zones:S.zones,zoneR:ZONE_R,strict:S.strict,second};
     const prog=pre=>(n,two)=>{const el=$('prog');if(el)el.textContent=two?`Double-checking with a second routing engine (${n} stop${n===1?'':'s'} so far)…`:pre+(n?`testing with ${n} stop${n>1?'s':''}…`:'testing the fastest route…')};
@@ -471,7 +471,7 @@ function render(){
         :`<div class="match ${good?'good':'warn'}"><b>${pct}%</b> predicted match with your route${good?'':'. Try moving one of your points onto a main road, or add a point where the dashed line strays.'}</div>`}
       <div class="legend"><span><i></i>Your drawing</span><span><i class="pred"></i>Predicted drive in Google/Apple</span>${r.zones?'<span><i class="x"></i>Stay off</span>':''}</div>
       <div class="seg" role="tablist" aria-label="How many stops">${Object.keys(LEVELS).map(k=>`<button role="tab" data-level="${k}" aria-selected="${S.level===k}" class="${S.level===k?'on':''}">${LEVELS[k].label}</button>`).join('')}</div>
-      <p class="hint">${(LEVELS[S.level]||LEVELS.balanced).note}${r.checked==='failed'?' The second routing engine was unavailable just now, so this was checked with one engine only.':''}</p>
+      <p class="hint">${(LEVELS[S.level]||LEVELS.few).note}${r.checked==='failed'?' The second routing engine was unavailable just now, so this was checked with one engine only.':''}</p>
       ${r.blocked?`<p class="hint">${r.blocked} ✕ ${r.blocked===1?'is':'are'} on your own route, so ${r.blocked===1?'it was':'they were'} ignored.</p>`:''}
       ${parts.length>1?`<p class="hint" style="margin:0 0 8px">Your route needs more than ${PART_MAX} stops, so it's split into ${parts.length} parts. Open part 2 when you reach the end of part 1 (⇥).</p>`:''}
       ${linkBlocks(r)}

@@ -31,8 +31,8 @@ The page calls these free public services straight from the visitor's browser:
 
 The result screen has a three-way control for how firmly the route is pinned down:
 
-- **Fewest stops**: one routing engine, stops only where the fastest route would leave the drawn one.
-- **Balanced** (default): two engines, plus a stop at least every 2 km so no long stretch is left to chance.
+- **Fewest stops** (default): one routing engine, stops only where the fastest route would leave the drawn one.
+- **Balanced**: two engines, plus a stop at least every 2 km so no long stretch is left to chance.
 - **Most reliable**: two engines, plus a stop at least every 700 m. Longer routes need several links (9 stops each).
 
 The spacings were chosen by trying 2 km, 1.2 km and 700 m on the live test routes and scoring each with an outside engine.

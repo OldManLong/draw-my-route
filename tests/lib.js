@@ -15,7 +15,7 @@ async function launch() {
 /* Opens the site on an emulated iPhone and collects every error the page raises. */
 async function openApp(browser, url, { mock, level } = {}) {
   const ctx = await browser.newContext({ ...devices['iPhone 13'], permissions: [] });
-  // level: 'few' | 'balanced' | 'most' presets the app's stops setting (it defaults to balanced).
+  // level: 'few' | 'balanced' | 'most' presets the app's stops setting (it defaults to few).
   if (level) await ctx.addInitScript(l => { try { localStorage.setItem('dmr.level', JSON.stringify(l)); } catch (e) {} }, level);
   const page = await ctx.newPage();
   const errors = [], calls = { osrm: 0, valhalla: 0, nominatim: 0, tiles: 0 };
