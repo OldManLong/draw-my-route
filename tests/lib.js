@@ -52,7 +52,7 @@ async function buildLinks(page, timeout = 240000) {
   return page.evaluate(() => {
     const D = window.DMR, r = D.S.result;
     if (!r) return null;
-    const parts = D.splitParts(r.origin, r.dest, r.stops);
+    const parts = D.splitParts(r.origin, r.dest, r.stops, r.names);
     return {
       origin: r.origin, dest: r.dest, stops: r.stops, score: r.score, score2: r.score2, match: r.match, checked: r.checked, level: r.level, same: r.same, drawnBy: D.S.desired.src || 'server', predicted2: r.cand2 ? r.cand2.coords : null, avoid: r.avoid, avoidOnly: r.avoidOnly, crossed: r.crossed, zones: r.zones, blocked: r.blocked,
       predicted: r.cand.coords, parts,

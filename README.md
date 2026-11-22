@@ -22,6 +22,10 @@ How it works for the person using it:
    Or tap **Avoid a road** and tap any road you would rather not drive on; the route moves off it.
 3. Tap **Send to Google or Apple Maps**. You can open the route yourself or share it, with a note, with someone else.
 
+The start and destination are handed to the maps app as real places: the name and address of a place picked
+from search, or the street address of a dropped pin or your own location. A spot with no clear address goes as
+exact coordinates. The in-between stops are always coordinates, so nobody mistakes one for the destination.
+
 Google and Apple do not accept a drawn route, so the site adds in-between stops that pull them onto yours.
 Stops are announced while driving, so by default it adds as few as possible.
 There is deliberately no blanket "avoid highways" switch: a quiet rural highway and an eight-lane interstate

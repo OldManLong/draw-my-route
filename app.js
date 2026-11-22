@@ -273,15 +273,18 @@ async function findStops(desiredLL, opts, onProgress){
 
 /* ---------------- Links ---------------- */
 const f6=ll=>ll[0].toFixed(6)+','+ll[1].toFixed(6);
-function splitParts(origin,dest,stops){const parts=[];let o=origin,i=0;
+/* names (optional): {o, d} text for the trip's real start and destination: a place name with its address, or a street address.
+   Only the first part's start and the last part's end get one. Every stop, and the joins between parts, stay coordinates. */
+function splitParts(origin,dest,stops,names){const parts=[];let o=origin,i=0;
   for(;;){const rest=stops.slice(i);if(rest.length<=PART_MAX){parts.push({o,w:rest,d:dest});break}parts.push({o,w:rest.slice(0,PART_MAX),d:rest[PART_MAX]});o=rest[PART_MAX];i+=PART_MAX+1}
+  if(names){if(names.o)parts[0].on=names.o;if(names.d)parts[parts.length-1].dn=names.d}
   return parts}
 function googleLink(p,fromHere,avoid){const e=s=>encodeURIComponent(s);
   let w=p.w.slice();if(fromHere)w=[p.o,...w];
-  return 'https://www.google.com/maps/dir/?api=1'+(fromHere?'':'&origin='+e(f6(p.o)))+'&destination='+e(f6(p.d))+'&travelmode=driving&dir_action=navigate'+(avoid?'&avoid=highways':'')+(w.length?'&waypoints='+w.map(x=>e(f6(x))).join('%7C'):'')}
+  return 'https://www.google.com/maps/dir/?api=1'+(fromHere?'':'&origin='+e(p.on||f6(p.o)))+'&destination='+e(p.dn||f6(p.d))+'&travelmode=driving&dir_action=navigate'+(avoid?'&avoid=highways':'')+(w.length?'&waypoints='+w.map(x=>e(f6(x))).join('%7C'):'')}
 function appleLink(p,fromHere,avoid){const e=s=>encodeURIComponent(s);
   let w=p.w.slice();if(fromHere)w=[p.o,...w];
-  return 'https://maps.apple.com/directions?'+(fromHere?'':'source='+e(f6(p.o))+'&')+'destination='+e(f6(p.d))+w.map(x=>'&waypoint='+e(f6(x))).join('')+'&mode=driving'+(avoid?'&avoid=highways':'')}
+  return 'https://maps.apple.com/directions?'+(fromHere?'':'source='+e(p.on||f6(p.o))+'&')+'destination='+e(p.dn||f6(p.d))+w.map(x=>'&waypoint='+e(f6(x))).join('')+'&mode=driving'+(avoid?'&avoid=highways':'')}
 
 /* polyline encode/decode (Google's algorithm) for share links */
 function encPoly(pts){let out='',pl=0,pn=0;const enc=v=>{v=v<0?~(v<<1):v<<1;let s='';while(v>=0x20){s+=String.fromCharCode((0x20|(v&0x1f))+63);v>>=5}return s+String.fromCharCode(v+63)};
@@ -310,7 +313,7 @@ if(DEMO){
 }
 
 /* ---------------- State ---------------- */
-const S={mode:'draw',pts:[],snap:true,desired:null,markers:[],line:null,busy:0,result:null,resLayers:[],level:load('dmr.level','few'),tool:'route',zones:[],zoneLayers:[],strict:false,fromHere:load('wps.fromHere',false),name:'',note:'',fromLabel:'',toLabel:'',toWait:null,grab:null};
+const S={mode:'draw',pts:[],snap:true,desired:null,markers:[],line:null,busy:0,result:null,resLayers:[],level:load('dmr.level','few'),tool:'route',zones:[],zoneLayers:[],strict:false,fromHere:load('wps.fromHere',false),name:'',note:'',fromLabel:'',toLabel:'',fromQ:'',toQ:'',toWait:null,grab:null};
 const sheet=$('sheet');
 
 function pinIcon(label,cls){return L.divIcon({className:'',html:`<div class="pin ${cls}">${label}</div>`,iconSize:[26,26],iconAnchor:[13,13]})}
@@ -323,28 +326,55 @@ function drawPoints(){
     m.on('dragstart',()=>{if(S.pts.length>1)liveStart(i,finePointer(),via)});
     m.on('drag',e=>{const ll=e.target.getLatLng(),c=map.latLngToContainerPoint(ll);liveMove([ll.lat,ll.lng],c.x,c.y)});
     m.on('dragend',e=>{const ll=e.target.getLatLng();if(!live.on||!liveNear(live.pt,[map.latLngToContainerPoint(ll).x,map.latLngToContainerPoint(ll).y]))S.pts[i]=[ll.lat,ll.lng];
-      if(i===0)S.fromLabel='';else if(last)S.toLabel='';
-      if(live.on)liveEnd();else changed()});
+      if(i===0){S.fromLabel='';S.fromQ=''}else if(last){S.toLabel='';S.toQ=''}
+      if(live.on)liveEnd();else changed();
+      if(i===0)describeEnd('from');else if(last)describeEnd('to')});
     m.on('click',()=>{const div=document.createElement('div');div.className='pop';div.innerHTML=`<b>${i===0?'Start':last?'Destination':'Your route goes through here'}</b><button class="btn small danger">Remove</button>`;
       div.querySelector('button').onclick=()=>{map.closePopup();removePt(i);changed()};m.bindPopup(div,{closeButton:false}).openPopup()});
     S.markers.push(m)});
 }
 function removePt(i){const n=S.pts.length;
-  if(i===0){S.fromLabel=n===2?S.toLabel:'';if(n===2)S.toLabel=''}else if(i===n-1)S.toLabel='';
+  if(i===0){S.fromLabel=n===2?S.toLabel:'';S.fromQ=n===2?S.toQ:'';if(n===2){S.toLabel='';S.toQ=''}}else if(i===n-1){S.toLabel='';S.toQ=''}
   S.pts.splice(i,1)}
+/* What to call a place in the maps apps. From an OpenStreetMap search or reverse-lookup result: a named place with its
+   address ("Frame Park, 1150 Baxter St, Waukesha, Wisconsin 53186"), or a street address with a house number. Anything
+   vaguer (a bare road or town) returns '' and the place goes out as coordinates, which are exact. */
+function placeText(p){
+  const a=p.address||{},town=a.city||a.town||a.village||a.hamlet||a.municipality||'';
+  const street=a.road?((a.house_number?a.house_number+' ':'')+a.road):'';
+  const named=!!p.name&&p.name!==a.road&&!['highway','place','boundary','waterway','railway'].includes(p.category||p.class);
+  if(!town||(!named&&!a.house_number))return {label:p.name||street||'',q:''};
+  const tail=[town,[a.state,a.postcode].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return {label:named?p.name:street,q:[named?p.name:'',named&&!a.house_number?'':street,tail].filter(Boolean).join(', ')};
+}
+/* Look up the address at one end of the trip (a tapped or dragged pin, or the user's own location). */
+async function describeEnd(which){
+  if(DEMO)return;
+  const ll=which==='from'?S.pts[0]:S.pts[S.pts.length-1];if(!ll||(which==='to'&&S.pts.length<2))return;
+  try{
+    const r=await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&addressdetails=1&lat=${ll[0].toFixed(6)}&lon=${ll[1].toFixed(6)}`);
+    const p=await r.json();if(!p||p.error)return;
+    if((which==='from'?S.pts[0]:S.pts[S.pts.length-1])!==ll)return;     // the pin has moved since we asked
+    if(hav(ll,[+p.lat,+p.lon])>60)return;                              // nearest address is too far off to stand for this spot
+    const t=placeText(p);if(!t.q)return;
+    if(which==='from'){if(S.fromLabel!=='My location')S.fromLabel=t.label;S.fromQ=t.q}else{S.toLabel=t.label;S.toQ=t.q}
+    syncEnds();
+  }catch(e){/* no address: the end goes out as coordinates */}
+}
 /* From / To boxes */
 function syncEnds(){const n=S.pts.length,f=$('q-from'),t=$('q-to');if(!f||!t)return;
   if(document.activeElement!==f)f.value=n?S.fromLabel||'Pin on map':'';
   if(document.activeElement!==t)t.value=n>1?S.toLabel||'Pin on map':S.toWait?S.toWait.label:''}
-function setEnd(which,ll,label){
+function setEnd(which,ll,label,q=''){
   if(S.mode!=='draw')editRoute();
-  if(which==='from'){S.fromLabel=label;
-    if(S.pts.length)S.pts[0]=ll;else{S.pts.push(ll);if(S.toWait){S.pts.push(S.toWait.ll);S.toLabel=S.toWait.label;S.toWait=null}}}
+  if(which==='from'){S.fromLabel=label;S.fromQ=q;
+    if(S.pts.length)S.pts[0]=ll;else{S.pts.push(ll);if(S.toWait){S.pts.push(S.toWait.ll);S.toLabel=S.toWait.label;S.toQ=S.toWait.q||'';S.toWait=null}}}
   else{
-    if(!S.pts.length){S.toWait={ll,label};syncEnds();map.setView(ll,14);toast('Now set where you are starting from.');return}
-    S.toLabel=label;if(S.pts.length===1)S.pts.push(ll);else S.pts[S.pts.length-1]=ll}
+    if(!S.pts.length){S.toWait={ll,label,q};syncEnds();map.setView(ll,14);toast('Now set where you are starting from.');return}
+    S.toLabel=label;S.toQ=q;if(S.pts.length===1)S.pts.push(ll);else S.pts[S.pts.length-1]=ll}
   if(S.pts.length<2)map.setView(ll,15);else S.fitNext=true;
   changed();
+  if(!q)describeEnd(which);                                            // my location or a bare spot: find its address
 }
 function useMyLocation(){
   if(!navigator.geolocation){toast('This browser cannot share your location.');return}
@@ -572,6 +602,8 @@ map.on('click',e=>{
   if(S.pts.length>=2&&!$('t-end')?.checked){let best=hav(S.pts[S.pts.length-1],p);
     for(let i=0;i<S.pts.length-1;i++){const add=hav(S.pts[i],p)+hav(p,S.pts[i+1])-hav(S.pts[i],S.pts[i+1]);if(add<best){best=add;idx=i+1}}}
   S.pts.splice(idx,0,p);
+  if(S.pts.length===1){S.fromLabel='';S.fromQ='';changed();describeEnd('from');return}
+  if(S.pts.length===2&&idx===1){S.toLabel='';S.toQ='';changed();describeEnd('to');return}
   if(S.pts.length>2&&idx>0&&idx<S.pts.length-1){drawPoints();snapVia(idx,finePointer(),true).then(ok=>{if(ok)changed()})}else changed();
 });
 
@@ -595,7 +627,7 @@ async function build(){
     const res=await findStops(line.coords,base,prog('Google and Apple: '));
     const pick=res;
     pick.same=line===S.desired?1:lineMatch(S.desired.coords,line.coords);   // how much of the shaped line the sent line shares
-    pick.level=S.level;S.result=pick;S.mode='result';showResult();render();fitRoute(line.coords);return;
+    pick.names={o:S.fromQ,d:S.toQ};pick.level=S.level;S.result=pick;S.mode='result';showResult();render();fitRoute(line.coords);return;
   }catch(e){toast(e.message||'Something went wrong. Try again.');S.mode='draw';drawPoints()}
   render();
 }
@@ -609,7 +641,7 @@ function showResult(){
   S.markers.forEach(m=>map.removeLayer(m));S.markers=[];drawZones();
   if(S.line&&S.sent)S.line.setLatLngs(S.sent.coords);                 // show the line that is being sent
   S.resLayers.push(L.polyline(r.cand.coords,{color:css('--accent'),weight:3,dashArray:'6 7',opacity:.9}).addTo(map));
-  const parts=splitParts(r.origin,r.dest,r.stops);let n=0;
+  const parts=splitParts(r.origin,r.dest,r.stops,r.names);let n=0;
   parts.forEach((p,pi)=>{p.w.forEach(w=>{n++;S.resLayers.push(L.marker(w,{icon:pinIcon(n,'fake'),interactive:false}).addTo(map))});
     if(pi<parts.length-1){n++;S.resLayers.push(L.marker(p.d,{icon:pinIcon('⇥','split'),interactive:false}).addTo(map))}});
   S.resLayers.push(L.marker(r.origin,{icon:pinIcon('A','start'),interactive:false}).addTo(map));
@@ -622,7 +654,7 @@ async function copyText(text,btn){
 function flash(btn,t){if(!btn)return;const o=btn.textContent;btn.textContent=t;setTimeout(()=>btn.textContent=o,1600)}
 function shareLink(){
   const r=S.result;const simp=simplify((S.sent||S.desired).coords.map(P),6).map(U);
-  const data={v:1,n:S.name||'',o:r.origin.map(x=>+x.toFixed(6)),d:r.dest.map(x=>+x.toFixed(6)),s:r.stops.map(s=>s.map(x=>+x.toFixed(6))),z:S.zones.map(s=>s.map(x=>+x.toFixed(5))),...(r.avoid?{aa:1}:{}),...(S.note.trim()?{t:S.note.trim().slice(0,140)}:{}),p:encPoly(simp),m:+r.match.toFixed(3)};
+  const data={v:1,n:S.name||'',o:r.origin.map(x=>+x.toFixed(6)),d:r.dest.map(x=>+x.toFixed(6)),s:r.stops.map(s=>s.map(x=>+x.toFixed(6))),z:S.zones.map(s=>s.map(x=>+x.toFixed(5))),...(r.avoid?{aa:1}:{}),...(S.note.trim()?{t:S.note.trim().slice(0,140)}:{}),...(r.names&&r.names.o?{on:r.names.o}:{}),...(r.names&&r.names.d?{dn:r.names.d}:{}),p:encPoly(simp),m:+r.match.toFixed(3)};
   return location.href.split('#')[0]+'#r='+b64u.enc(JSON.stringify(data));
 }
 
@@ -637,20 +669,20 @@ $('b-loc').onclick=useMyLocation;
 function showHits(hits){const el=$('results');el.innerHTML='';
   if(!hits.length)el.innerHTML='<button disabled>No matches. Try a street or place name.</button>';
   hits.slice(0,8).forEach(h=>{const b=document.createElement('button');b.innerHTML=`${esc(h.name)}<small>${esc(h.sub||'')}</small>`;
-    b.onclick=()=>{el.hidden=true;$('q-from').blur();$('q-to').blur();setEnd(qWhich,h.ll,h.name)};el.appendChild(b)});
+    b.onclick=()=>{el.hidden=true;$('q-from').blur();$('q-to').blur();setEnd(qWhich,h.ll,h.name,h.q||'')};el.appendChild(b)});
   el.hidden=false}
 async function search(q){
   if(!q)return;
   if(DEMO){const v=q.toLowerCase();showHits(DEMO.places.filter(p=>(p.name+' '+(p.sub||'')).toLowerCase().includes(v)));return}
   const c=map.getCenter();
-  try{const r=await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=8&q=${encodeURIComponent(q)}&viewbox=${c.lng-0.5},${c.lat+0.4},${c.lng+0.5},${c.lat-0.4}`);
-    const j=await r.json();showHits(j.map(p=>{const parts=p.display_name.split(', ');return {name:parts[0],sub:parts.slice(1,4).join(', '),ll:[+p.lat,+p.lon]}}))}
+  try{const r=await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&q=${encodeURIComponent(q)}&viewbox=${c.lng-0.5},${c.lat+0.4},${c.lng+0.5},${c.lat-0.4}`);
+    const j=await r.json();showHits(j.map(p=>{const parts=p.display_name.split(', '),t=placeText(p);return {name:t.label||parts[0],sub:parts.slice(1,4).join(', '),ll:[+p.lat,+p.lon],q:t.q}}))}
   catch(e){toast('Search is unavailable right now.')}
 }
 
 /* ---------------- Sheet ---------------- */
 function linkBlocks(r){
-  const g=splitParts(r.origin,r.dest,r.stops),here=i=>S.fromHere&&i===0,av=!!r.avoid;
+  const g=splitParts(r.origin,r.dest,r.stops,r.names),here=i=>S.fromHere&&i===0,av=!!r.avoid;
   const ptitle=(i,n,p)=>n>1?`<div class="ptitle">Part ${i+1} of ${n} · ${p.w.length} stop${p.w.length===1?'':'s'}</div>`:'';
   return g.map((p,i)=>`<div class="part">${ptitle(i,g.length,p)}<div class="row"><a class="btn google" href="${esc(googleLink(p,here(i),av))}" target="_blank" rel="noopener">Open in Google Maps</a><a class="btn apple" href="${esc(appleLink(p,here(i),av))}" target="_blank" rel="noopener">Open in Apple Maps</a></div>
     <div class="row"><button class="btn small" data-copy="g${i}">Copy Google link</button><button class="btn small" data-copy="a${i}">Copy Apple link</button></div></div>`).join('')
@@ -673,20 +705,21 @@ function render(){
       ${DEMO?'<p class="hint">Demo map: Waukesha, WI and I-94. The hosted version works anywhere.</p>':''}`;
     $('b-build').onclick=build;
     $('b-avoid').onclick=()=>{S.tool=av?'route':'avoid';render()};
-    $('b-rev').onclick=()=>{S.pts.reverse();[S.fromLabel,S.toLabel]=[S.toLabel,S.fromLabel];changed()};
-    $('b-clear').onclick=()=>{S.pts=[];S.zones=[];S.fromLabel=S.toLabel='';S.toWait=null;S.tool='route';drawZones();changed()};
+    $('b-rev').onclick=()=>{S.pts.reverse();[S.fromLabel,S.toLabel]=[S.toLabel,S.fromLabel];[S.fromQ,S.toQ]=[S.toQ,S.fromQ];changed()};
+    $('b-clear').onclick=()=>{S.pts=[];S.zones=[];S.fromLabel=S.toLabel=S.fromQ=S.toQ='';S.toWait=null;S.tool='route';drawZones();changed()};
   }
   else if(m==='working'){
     sheet.innerHTML=`<h2>Finding your stops</h2><p class="sub" id="prog">Testing the fastest route…</p><p class="hint">Draw My Route checks the route Google and Apple would most likely pick, and adds a stop wherever it would leave your path.</p>`;
   }
   else if(m==='result'){
-    const r=S.result,parts=splitParts(r.origin,r.dest,r.stops),pct=Math.floor(r.match*100),ns=r.stops.length,sn=`${ns} stop${ns===1?'':'s'}`;
+    const r=S.result,parts=splitParts(r.origin,r.dest,r.stops,r.names),pct=Math.floor(r.match*100),ns=r.stops.length,sn=`${ns} stop${ns===1?'':'s'}`;
     const good=r.avoidOnly?r.crossed===0:r.match>=0.97,nzs=r.zones===1?'road you marked':`${r.zones} roads you marked`;
     sheet.innerHTML=`<h2>${r.avoidOnly?(ns?`${sn} keep${ns===1?'s':''} them off the ${nzs}`:`No stops needed`):(ns?`${sn} keep${ns===1?'s':''} them on your route`:'No stops needed')}</h2>
       <p class="sub">${r.avoidOnly?(ns?'Everywhere else, Google and Apple are free to pick their own roads.':'The fastest route already stays off those roads, so the links just go from A to B.')
         :(ns?'Google Maps and Apple Maps will route through these points in order, which keeps them on your path.':'The fastest route already follows your path, so the links just go from A to B.')}</p>
       ${r.avoidOnly?`<div class="match ${good?'good':'warn'}">${good?`<b>✓</b> Predicted to stay off ${r.zones===1?'the':'all'} ${nzs}`:`<b>${r.crossed}</b> marked spot${r.crossed===1?' is':'s are'} still on the predicted route. Draw your route around ${r.crossed===1?'it':'them'}.`}</div>`
         :`<div class="match ${good?'good':'warn'}"><b>${pct}%</b> predicted match with your route${good?'':'. Try moving one of your points onto a main road, or add a point where the dashed line strays.'}</div>`}
+      ${r.names&&(r.names.o||r.names.d)?`<p class="hint">${r.names.o?`From <b>${esc(r.names.o)}</b>`:'From your pin'} to ${r.names.d?`<b>${esc(r.names.d)}</b>`:'your pin'}.</p>`:''}
       ${r.same<0.9?'<p class="hint">Between your pins, the maps apps are expected to use some different side streets from the line you shaped. The orange line shows what is being sent. Go back and add a pin on any road that matters to you.</p>':''}
       <div class="legend"><span><i></i>Your route</span><span><i class="pred"></i>Predicted drive in Google/Apple</span>${r.zones?'<span><i class="x"></i>Road to avoid</span>':''}</div>
       <div class="seg" role="tablist" aria-label="How many stops">${Object.keys(LEVELS).map(k=>`<button role="tab" data-level="${k}" aria-selected="${S.level===k}" class="${S.level===k?'on':''}">${LEVELS[k].label}</button>`).join('')}</div>
@@ -712,18 +745,18 @@ function render(){
     sheet.querySelectorAll('[data-level]').forEach(b=>b.onclick=()=>{if(S.level===b.dataset.level)return;S.level=b.dataset.level;store('dmr.level',S.level);build()});
     if($('t-strict'))$('t-strict').onchange=e=>{S.strict=e.target.checked;build()};
     $('b-edit').onclick=editRoute;
-    $('b-new').onclick=()=>{S.pts=[];S.zones=[];S.fromLabel=S.toLabel='';S.toWait=null;S.note='';S.tool='route';editRoute();changed()};
+    $('b-new').onclick=()=>{S.pts=[];S.zones=[];S.fromLabel=S.toLabel=S.fromQ=S.toQ='';S.toWait=null;S.note='';S.tool='route';editRoute();changed()};
   }
   else if(m==='viewer'){
-    const v=S.viewer,parts=splitParts(v.o,v.d,v.s);
+    const v=S.viewer,parts=splitParts(v.o,v.d,v.s,{o:v.on,d:v.dn});
     sheet.innerHTML=`<h2>${esc(v.n||'Shared route')}</h2>${v.t?`<p class="note">${esc(String(v.t).slice(0,140))}</p>`:''}<p class="sub">Someone drew this route for you. Open it in your maps app and it will follow the orange line${v.s.length?` using ${v.s.length} in-between stop${v.s.length>1?'s':''}`:''}.</p>
-      ${linkBlocks({origin:v.o,dest:v.d,stops:v.s,avoid:!!v.aa})}
+      ${linkBlocks({origin:v.o,dest:v.d,stops:v.s,avoid:!!v.aa,names:{o:v.on,d:v.dn}})}
       <label class="toggle"><input type="checkbox" id="t-here" ${S.fromHere?'checked':''}> Start from my current location</label>
       <p class="hint">${v.s.length?'The app will announce each in-between stop. Just keep driving; if it pauses, tap Continue or Resume. ':''}Apple Maps links need iOS 18.4 or later.</p>
       <div class="row" style="margin-top:8px"><a class="btn small" href="${esc(location.href.split('#')[0])}">Draw your own route</a></div>`;
     $('t-here').onchange=e=>{S.fromHere=e.target.checked;render()};
     sheet.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{const k=b.dataset.copy,i=+k.slice(1),here=S.fromHere&&i===0;
-      const g=splitParts(v.o,v.d,v.s);copyText(k[0]==='g'?googleLink(g[i],here,!!v.aa):appleLink(g[i],here,!!v.aa),b)});
+      const g=splitParts(v.o,v.d,v.s,{o:v.on,d:v.dn});copyText(k[0]==='g'?googleLink(g[i],here,!!v.aa):appleLink(g[i],here,!!v.aa),b)});
   }
   const r=sheet.getBoundingClientRect();document.documentElement.style.setProperty('--sheet-h',r.height+'px');
 }
@@ -732,7 +765,7 @@ function render(){
 function openViewer(){
   try{const v=JSON.parse(b64u.dec(location.hash.slice(3)));if(!v.o||!v.d)throw 0;S.viewer=v;S.mode='viewer';S.fromHere=false;
     const path=decPoly(v.p||'');if(path.length>1)L.polyline(path,{color:css('--drawn'),weight:7}).addTo(map);
-    let n=0;splitParts(v.o,v.d,v.s).forEach((p,pi,arr)=>{p.w.forEach(w=>L.marker(w,{icon:pinIcon(++n,'fake'),interactive:false}).addTo(map));if(pi<arr.length-1)L.marker(p.d,{icon:pinIcon('⇥','split'),interactive:false}).addTo(map),n++});
+    let n=0;splitParts(v.o,v.d,v.s,{o:v.on,d:v.dn}).forEach((p,pi,arr)=>{p.w.forEach(w=>L.marker(w,{icon:pinIcon(++n,'fake'),interactive:false}).addTo(map));if(pi<arr.length-1)L.marker(p.d,{icon:pinIcon('⇥','split'),interactive:false}).addTo(map),n++});
     (v.z||[]).forEach(z=>{L.circle(z,{radius:40,color:css('--danger'),weight:2,fillOpacity:.22,interactive:false}).addTo(map);L.marker(z,{icon:pinIcon('✕','avoid'),interactive:false}).addTo(map)});
     L.marker(v.o,{icon:pinIcon('A','start')}).addTo(map);L.marker(v.d,{icon:pinIcon('B','end')}).addTo(map);
     render();fitRoute(path.length>1?path:[v.o,v.d]);return true}
@@ -744,5 +777,5 @@ if(!DEMO&&location.hash.startsWith('#r=')&&openViewer()){}else{render();
 }
 
 /* Handle for the automated tests in tests/ (not used by the app itself). */
-window.DMR={map,S,local,live,lineMatch,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
+window.DMR={map,S,local,live,lineMatch,placeText,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
 })();

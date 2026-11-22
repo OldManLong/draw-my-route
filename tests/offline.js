@@ -46,7 +46,12 @@ const WAUKESHA = JSON.stringify(waukeshaOverpass());
 const waukeshaRoads = route => route.fulfill({ contentType: 'application/json', body: WAUKESHA });
 const W = { library: [43.0086229, -88.2328702], airport: [43.0396037, -88.2348839], hospital: [43.0114004, -88.2430759] };
 
-function fakeServices({ osrm, valhalla, locate, roads } = {}) {
+/* Place search and address lookup stand-ins (OpenStreetMap's Nominatim). */
+const FRAME_PARK = { name: 'Frame Park', category: 'leisure', display_name: 'Frame Park, 1150, Baxter Street, Waukesha, Waukesha County, Wisconsin, 53186, United States', lat: '43.018', lon: '-88.224', address: { house_number: '1150', road: 'Baxter Street', city: 'Waukesha', state: 'Wisconsin', postcode: '53186' } };
+const houseAt = u => { const q = new URL(u).searchParams; return { lat: q.get('lat'), lon: q.get('lon'), category: 'building', name: '', address: { house_number: '101', road: 'West Main Street', city: 'Waukesha', state: 'Wisconsin', postcode: '53186' } }; };
+const bareRoadAt = u => { const q = new URL(u).searchParams; return { lat: q.get('lat'), lon: q.get('lon'), category: 'highway', name: 'County Road F', address: { road: 'County Road F', city: 'Waukesha', state: 'Wisconsin' } }; };
+
+function fakeServices({ osrm, valhalla, locate, roads, reverse } = {}) {
   return route => {
     const u = route.request().url();
     if (u.includes('tile.openstreetmap.org')) return route.fulfill({ body: PNG, contentType: 'image/png' });
@@ -62,7 +67,8 @@ function fakeServices({ osrm, valhalla, locate, roads } = {}) {
       if (valhallaQuery(u).exclude_locations) return valhallaAnswer(route, aroundMarks(valhallaPts(u)));
       return valhalla ? valhalla(route, u) : valhallaAnswer(route, valhallaPts(u)); // by default the second engine agrees with the first
     }
-    if (u.includes('nominatim')) return json(route, [{ display_name: 'Frame Park, Waukesha, Wisconsin, USA', lat: '43.018', lon: '-88.224' }]);
+    if (u.includes('nominatim') && u.includes('/reverse')) return json(route, reverse ? reverse(u) : { error: 'Unable to geocode' }); // by default: no address known
+    if (u.includes('nominatim')) return json(route, [FRAME_PARK]);
     return route.abort();
   };
 }
@@ -253,12 +259,66 @@ module.exports = async function offline(browser, url) {
     await ctx.close();
   });
 
+  await S.test('Start and destination go out as real places; only the stops are coordinates', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ reverse: houseAt }) });
+    // From: a pin tapped on the map (its address is looked up). To: a place picked from search.
+    await page.mouse.click(80, 200);
+    await page.waitForFunction(() => window.DMR.S.fromQ !== '', null, { timeout: 5000 });
+    t.check(await page.inputValue('#q-from') === '101 West Main Street', 'From box does not show the address of the tapped spot: ' + await page.inputValue('#q-from'));
+    await page.fill('#q-to', 'frame park'); await page.waitForSelector('#results button:not([disabled])'); await page.click('#results button');
+    await page.waitForFunction(() => window.DMR.S.desired && !window.DMR.S.busy);
+    // bend the route so it needs a stop
+    await page.evaluate(() => { const D = window.DMR, a = D.S.pts[0], b = D.S.pts[1]; D.S.pts.splice(1, 0, [(a[0] + b[0]) / 2 + 0.006, (a[1] + b[1]) / 2]); D.changed(); });
+    await page.waitForFunction(() => window.DMR.S.desired && !window.DMR.S.busy && window.DMR.S.desired.coords.length === 3);
+    const r = await buildLinks(page);
+    const g = new URL(r.google[0]), a = new URL(r.apple[0]), coord = /^-?\d{1,3}\.\d{6},-?\d{1,3}\.\d{6}$/;
+    t.note('Google: from "' + g.searchParams.get('origin') + '" to "' + g.searchParams.get('destination') + '" via ' + g.searchParams.get('waypoints'));
+    t.check(g.searchParams.get('origin') === '101 West Main Street, Waukesha, Wisconsin 53186', 'Google start is not the street address');
+    t.check(g.searchParams.get('destination') === 'Frame Park, 1150 Baxter Street, Waukesha, Wisconsin 53186', 'Google destination is not the named place with its address');
+    t.check(a.searchParams.get('source') === g.searchParams.get('origin') && a.searchParams.get('destination') === g.searchParams.get('destination'), 'Apple link does not carry the same start and destination');
+    const gs = g.searchParams.get('waypoints').split('|'), as = a.searchParams.getAll('waypoint');
+    t.check(gs.length >= 1 && gs.every(w => coord.test(w)) && as.every(w => coord.test(w)), 'a stop is not a plain coordinate pair');
+    // the shared link carries the names too
+    const v = await ctx.newPage(); await v.route(u => u.origin !== new URL(url).origin, fakeServices());
+    await v.goto(r.share); await v.waitForFunction(() => window.DMR && window.DMR.S.mode === 'viewer');
+    t.check(await v.getAttribute('a.btn.google', 'href') === r.google[0], 'the shared link lost the place names');
+    // "start from my current location": the start is left out and becomes a coordinate stop
+    await page.click('details.opts summary'); await page.check('#t-here');
+    const here = new URL(await page.getAttribute('a.btn.google', 'href'));
+    t.check(!here.searchParams.get('origin') && here.searchParams.get('waypoints').split('|').every(w => coord.test(w)), '"start from my location" link is wrong');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('A spot with no real address (a bare road, or nothing nearby) goes out as coordinates', async t => {
+    for (const [what, reverse] of [['bare road', bareRoadAt], ['address 300 m away', u => { const h = houseAt(u); h.lat = String(+h.lat + 0.003); return h; }], ['no answer', null]]) {
+      const { ctx, page } = await openApp(browser, url, { mock: fakeServices({ reverse }) });
+      await page.mouse.click(80, 200); await page.waitForTimeout(400); await page.mouse.click(300, 220);
+      await page.waitForFunction(() => window.DMR.S.desired && !window.DMR.S.busy); await page.waitForTimeout(500);
+      const r = await buildLinks(page), g = new URL(r.google[0]), coord = /^-?\d{1,3}\.\d{6},-?\d{1,3}\.\d{6}$/;
+      t.check(coord.test(g.searchParams.get('origin')) && coord.test(g.searchParams.get('destination')), `${what}: expected coordinates, got "${g.searchParams.get('origin')}" to "${g.searchParams.get('destination')}"`);
+      await ctx.close();
+    }
+    const { ctx, page } = await openApp(browser, url, { mock: fakeServices() });
+    const cases = await page.evaluate(() => { const f = window.DMR.placeText; return [
+      f({ name: 'Target', category: 'shop', address: { house_number: '2401', road: 'Kossow Road', town: 'Waukesha', state: 'Wisconsin', postcode: '53186' } }).q,
+      f({ name: 'Frame Park', category: 'leisure', address: { road: 'Baxter Street', city: 'Waukesha', state: 'Wisconsin' } }).q,
+      f({ name: 'Main Street', category: 'highway', address: { road: 'Main Street', city: 'Waukesha', state: 'Wisconsin' } }).q,
+      f({ name: 'Waukesha', category: 'place', address: { city: 'Waukesha', state: 'Wisconsin' } }).q,
+      f({ name: 'Lonely Barn', category: 'building', address: { road: 'Farm Lane', state: 'Wisconsin' } }).q]; });
+    t.check(cases[0] === 'Target, 2401 Kossow Road, Waukesha, Wisconsin 53186', 'store: ' + cases[0]);
+    t.check(cases[1] === 'Frame Park, Waukesha, Wisconsin', 'named place without a house number: ' + cases[1]);
+    t.check(cases[2] === '' && cases[3] === '' && cases[4] === '', 'a bare road, a town or a place with no town was given a name: ' + cases.slice(2).join(' | '));
+    await ctx.close();
+  });
+
   await S.test('Starts from your current location when the browser allows it', async t => {
     const ctx = await browser.newContext({ ...require('playwright').devices['iPhone 13'], geolocation: { latitude: 43.0117, longitude: -88.2315 }, permissions: ['geolocation'] });
-    const page = await ctx.newPage(); await page.route(u => u.origin !== new URL(url).origin, fakeServices());
+    const page = await ctx.newPage(); await page.route(u => u.origin !== new URL(url).origin, fakeServices({ reverse: houseAt }));
     await page.goto(url);
-    await page.waitForFunction(() => window.DMR && window.DMR.S.pts.length === 1, null, { timeout: 8000 });
+    await page.waitForFunction(() => window.DMR && window.DMR.S.pts.length === 1 && window.DMR.S.fromQ !== '', null, { timeout: 8000 });
     t.check(await page.inputValue('#q-from') === 'My location', 'From box does not say My location');
+    t.check(await page.evaluate(() => window.DMR.S.fromQ) === '101 West Main Street, Waukesha, Wisconsin 53186', 'the address of my location was not looked up for the links');
     await page.fill('#q-to', 'frame park'); await page.waitForSelector('#results button:not([disabled])'); await page.click('#results button');
     await page.waitForFunction(() => window.DMR.S.pts.length === 2 && window.DMR.S.desired);
     await ctx.close();
