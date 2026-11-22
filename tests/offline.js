@@ -1,5 +1,6 @@
 // Offline tests: every outside service is faked, so these run anywhere in seconds and check the app's own logic.
 const { openApp, drawRoute, buildLinks, suite, OUT } = require('./lib');
+const { waukeshaOverpass } = require('./fixture');
 const path = require('path');
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
@@ -40,7 +41,12 @@ function bigRoadLocate(route, u) {
     : edge(l.lat - 0.0001, l.lon, 11, 'residential', 'Side Street')] })));
 }
 
-function fakeServices({ osrm, valhalla, locate } = {}) {
+/* Road-data service stand-ins. Real Waukesha roads from the fixture; by default (no `roads` option) the service is unreachable. */
+const WAUKESHA = JSON.stringify(waukeshaOverpass());
+const waukeshaRoads = route => route.fulfill({ contentType: 'application/json', body: WAUKESHA });
+const W = { library: [43.0086229, -88.2328702], airport: [43.0396037, -88.2348839], hospital: [43.0114004, -88.2430759] };
+
+function fakeServices({ osrm, valhalla, locate, roads } = {}) {
   return route => {
     const u = route.request().url();
     if (u.includes('tile.openstreetmap.org')) return route.fulfill({ body: PNG, contentType: 'image/png' });
@@ -49,6 +55,7 @@ function fakeServices({ osrm, valhalla, locate } = {}) {
       const pts = u.split('/driving/')[1].split('?')[0].split(';').map(s => s.split(',').map(Number));
       return json(route, { code: 'Ok', routes: [{ distance: 1000, duration: 100, geometry: { coordinates: pts }, legs: [{ steps: [{ intersections: [] }] }] }] });
     }
+    if (u.includes('overpass')) return roads ? roads(route, u) : route.abort();
     if (u.includes('valhalla') && u.includes('/locate')) return (locate || plainLocate)(route, u);
     if (u.includes('valhalla')) {
       if (valhallaPts(u).length > 10) return json(route, { error_code: 150, error: 'Exceeded max locations: 10' }, 400); // the real public server's limit
@@ -302,6 +309,71 @@ module.exports = async function offline(browser, url) {
     await page.waitForFunction(() => window.DMR.S.pts.length === 3 && !window.DMR.S.busy && !!window.DMR.S.grab, null, { timeout: 8000 });
     const at = await page.evaluate(() => { const p = window.DMR.map.latLngToContainerPoint(window.DMR.S.pts[1]); return [p.x, p.y]; });
     t.check(Math.abs(at[1] - (pin[1] + 30)) < 6, 'pin did not stay where it was dropped');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Roads on the phone: the line follows every movement along real roads, without waiting for the server', async t => {
+    let slow = false;
+    const straight = (route, u) => { const pts = u.split('/driving/')[1].split('?')[0].split(';').map(s => s.split(',').map(Number)); const answer = () => json(route, { code: 'Ok', routes: [{ distance: 1000, duration: 100, geometry: { coordinates: pts }, legs: [{ steps: [{ intersections: [] }] }] }] }); return slow ? setTimeout(answer, 3000) : answer(); };
+    const { ctx, page, errors, calls } = await openApp(browser, url, { mock: fakeServices({ roads: waukeshaRoads, osrm: straight }) });
+    await drawRoute(page, [W.library, W.airport]);
+    await page.waitForFunction(() => window.DMR.local.status === 'ready', null, { timeout: 8000 });
+    const net = await page.evaluate(() => ({ junctions: window.DMR.local.net.nodes, pieces: window.DMR.local.net.edges }));
+    t.note(`road network loaded: ${net.junctions} junctions, ${net.pieces} road pieces`);
+    t.check(net.pieces > 5000, 'road network looks incomplete');
+    await page.waitForTimeout(500);
+    const mid = await page.evaluate(([a, b]) => { const p = window.DMR.map.latLngToContainerPoint([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); return [p.x, p.y]; }, [W.library, W.airport]);
+    slow = true; const osrmBefore = calls.osrm, lookupsBefore = calls.valhalla;
+    await page.mouse.move(mid[0], mid[1]); await page.mouse.down();
+    const shapes = new Set(); let onRoads = 0;
+    for (let i = 1; i <= 30; i++) {                                   // thirty small movements, one frame apart
+      await page.mouse.move(mid[0] - 3 * i, mid[1] + i);
+      await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+      const line = await page.evaluate(() => window.DMR.S.line.getLatLngs().map(p => [p.lat, p.lng]));
+      shapes.add(JSON.stringify(line.map(p => [p[0].toFixed(5), p[1].toFixed(5)])));
+      if (line.length > 20) onRoads++;                                 // real roads bend; the fake server only ever answers with straight lines
+    }
+    const previews = await page.evaluate(() => window.DMR.live.previews);
+    t.note(`${previews} redraws for 30 movements, ${shapes.size} distinct line shapes, ${calls.osrm - osrmBefore} server routing requests still unanswered, ${calls.valhalla - lookupsBefore} road lookups`);
+    t.check(previews >= 25, `only ${previews} redraws for 30 movements`);
+    t.check(onRoads >= 28, 'the line did not follow real roads while dragging');
+    t.check(shapes.size >= 3, 'the line did not change as the pointer moved');
+    t.check(calls.valhalla - lookupsBefore === 0, 'road lookups went to the server even though the roads were on the phone');
+    await page.screenshot({ path: path.join(OUT, 'offline-local-drag.png') });
+    slow = false; await page.mouse.up();
+    await page.waitForFunction(() => window.DMR.S.pts.length === 3 && window.DMR.S.pts[1].snapped && !window.DMR.S.busy && !!window.DMR.S.grab, null, { timeout: 12000 });
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Roads on the phone: a dropped pin snaps to the larger road at once, with no server lookup', async t => {
+    const { ctx, page, errors, calls } = await openApp(browser, url, { mock: fakeServices({ roads: waukeshaRoads }) });
+    await drawRoute(page, [W.library, W.airport]);
+    await page.waitForFunction(() => window.DMR.local.status === 'ready', null, { timeout: 8000 });
+    // Same downtown spot as the live snapping test: 6 m from a service lane, about 16 m from North Barstow Street.
+    const out = await page.evaluate(async () => { const D = window.DMR; D.map.setView([43.0125, -88.2290], 16, { animate: false }); const t0 = performance.now(); const s = await D.snapToRoad([43.0125, -88.2290], false); return { s, ms: performance.now() - t0 }; });
+    t.note(`landed on "${out.s.name}" (${out.s.tier}) in ${out.ms.toFixed(1)} ms`);
+    t.check(out.s.name === 'North Barstow Street', `expected North Barstow Street, got "${out.s.name}"`);
+    t.check(out.ms < 50 && calls.valhalla === 0, 'the lookup went to the server');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Road download: falls over to the second server, and dragging still works if both are down', async t => {
+    let hits = [];
+    const firstDown = (route, u) => { hits.push(new URL(u).host); return new URL(u).host === 'overpass-api.de' ? route.abort() : waukeshaRoads(route); };
+    const one = await openApp(browser, url, { mock: fakeServices({ roads: firstDown }) });
+    await drawRoute(one.page, [W.library, W.airport]);
+    await one.page.waitForFunction(() => window.DMR.local.status === 'ready', null, { timeout: 8000 });
+    t.note('servers tried: ' + hits.join(', '));
+    t.check(hits.length === 2 && hits[0] === 'overpass-api.de', 'did not try the first server then the second');
+    await one.ctx.close();
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices() }); // road service unreachable
+    await drawRoute(page, [A, B]);
+    await page.waitForFunction(() => window.DMR.local.status === 'failed', null, { timeout: 8000 });
+    t.check(await page.isEnabled('#b-build'), 'app is unusable without the road download');
+    t.check(await page.locator('#roads').count() === 0, 'the "loading roads" note is stuck on screen');
     t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
   });

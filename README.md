@@ -9,7 +9,11 @@ How it works for the person using it:
 
 1. Set where you are starting (your location by default) and where you are going. The fastest route appears.
 2. Drag the orange line onto the roads you want. On a phone, press and hold the line first, then drag.
-   The route re-draws continuously while you drag, about three times a second.
+   While you drag, the route follows your finger. The page downloads the roads around your trip
+   (`roads.js`, from OpenStreetMap's Overpass service) and works out each redraw on the phone itself,
+   so there is no wait. The routing server still draws the final line when you pause or let go.
+   If the road download fails, or the trip covers too large an area, it falls back to asking the server
+   about three times a second.
    Where you let go, the route snaps to a road, and larger roads are favoured: a drop near a main road lands
    on it instead of on the side street or car park beside it. Freeways get no such favour.
    Or tap **Avoid a road** and tap any road you would rather not drive on; the route moves off it.
@@ -54,6 +58,7 @@ The result screen has a three-way control for how firmly the route is pinned dow
 - **Most reliable**: two engines, plus a stop at least every 700 m. Longer routes need several links (9 stops each).
 
 The spacings were chosen by trying 2 km, 1.2 km and 700 m on the live test routes and scoring each with an outside engine.
+- Road data for smooth dragging: Overpass (`overpass-api.de`, then `overpass.private.coffee` if that fails)
 - Search: Nominatim
 
 They are fine for personal and light use but are rate-limited and come with no uptime promise.

@@ -388,7 +388,43 @@ async function recompute(){
   }
   render();
   if(S.fitNext&&S.desired){S.fitNext=false;fitRoute(S.desired.coords)}
+  ensureLocal();
 }
+
+/* ---------------- Local roads: instant redraws while dragging ---------------- */
+/* Once a route exists, the roads around it are downloaded (roads.js) so the line can follow a finger with no server
+   round trip. The routing server still draws the final line on release: its fastest route is what Google and Apple
+   most often agree with, which keeps stops to a minimum. If the download fails, dragging falls back to asking the server. */
+const ROADS=window.DMRRoads||null;
+const local={status:'none',box:null,net:null,job:0,failedAt:0,cache:new Map(),blocked:null,blockedKey:''};
+const metresPerPx=lat=>40075016.686*Math.cos(lat*Math.PI/180)/(256*2**map.getZoom());
+function boxAround(coords,padM){let s=90,w=180,n=-90,e=-180;for(const c of coords){if(c[0]<s)s=c[0];if(c[0]>n)n=c[0];if(c[1]<w)w=c[1];if(c[1]>e)e=c[1]}
+  const dLat=padM/110540,dLon=padM/(111320*Math.cos((s+n)/2*Math.PI/180));return [s-dLat,w-dLon,n+dLat,e+dLon]}
+const boxHolds=(B,b)=>!!B&&b[0]>=B[0]&&b[1]>=B[1]&&b[2]<=B[2]&&b[3]<=B[3];
+const boxKm2=b=>(b[2]-b[0])*110.54*(b[3]-b[1])*111.32*Math.cos((b[0]+b[2])/2*Math.PI/180);
+const localCovers=pts=>local.status==='ready'&&boxHolds(local.box,boxAround(pts,150));
+async function ensureLocal(){
+  if(DEMO||!ROADS||!S.desired||!S.snap)return;
+  const need=boxAround(S.desired.coords,400);
+  if(boxHolds(local.box,need)&&(local.status==='ready'||local.status==='loading'))return;
+  const span=Math.max((need[2]-need[0])*110540,(need[3]-need[1])*111320*Math.cos(need[0]*Math.PI/180));
+  const box=boxAround(S.desired.coords,Math.max(1500,0.3*span));       // room to drag the line well off the direct way
+  if(boxKm2(box)>700){local.job++;Object.assign(local,{status:'toobig',box:null,net:null});return}   // long trips: too much road data for a phone
+  if(local.status==='failed'&&Date.now()-local.failedAt<60000)return;
+  const job=++local.job;Object.assign(local,{status:'loading',box,net:null});
+  if(S.mode==='draw'&&!live.on)render();
+  try{
+    const ways=await ROADS.fetchRoads(box);if(job!==local.job)return;
+    const net=ROADS.buildNet(ways,[(box[0]+box[2])/2,(box[1]+box[3])/2]);
+    if(!net.edges)throw new Error('no roads in that area');
+    Object.assign(local,{status:'ready',net,cache:new Map(),blocked:null,blockedKey:''});
+  }catch(e){if(job!==local.job)return;Object.assign(local,{status:'failed',failedAt:Date.now(),box:null,net:null})}
+  if(S.mode==='draw'&&!live.on)render();
+}
+/* Road stretches the preview must keep off (the ✕ marks). */
+function localBlocked(){const key=S.zones.map(z=>z.join(',')).join(';');
+  if(key!==local.blockedKey){local.blockedKey=key;local.blocked=S.zones.length?local.net.edgesNear(S.zones,ZONE_R):null;local.cache=new Map()}
+  return local.blocked}
 
 /* ---------------- Snap to roads, favouring larger ones ---------------- */
 /* Where a dragged or tapped route pin lands. The nearest road of any size is always a candidate, but main roads get a
@@ -402,7 +438,8 @@ const SNAP_TIERS=[
 async function snapToRoad(ll,fine){
   const raw={ll,name:'',tier:'none'};
   if(DEMO)return raw;
-  const mpp=40075016.686*Math.cos(ll[0]*Math.PI/180)/(256*2**map.getZoom()),k=fine?0.55:1;   // a mouse is more precise than a finger
+  const mpp=metresPerPx(ll[0]),k=fine?0.55:1;                          // a mouse is more precise than a finger
+  if(localCovers([ll])){const s=local.net.snap(ll,SNAP_TIERS,mpp,k);if(s)return s}   // roads already on the phone: answer at once
   const at={lat:+ll[0].toFixed(6),lon:+ll[1].toFixed(6)};
   const q={locations:SNAP_TIERS.map(t=>t.filter?{...at,search_filter:t.filter}:at),costing:'auto',verbose:true};
   const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),3000);
@@ -433,27 +470,42 @@ const finePointer=()=>!matchMedia('(pointer:coarse)').matches;
 /* While a pin is being dragged the route is re-drawn continuously: one routing request in flight at a time, and a new
    one sent as soon as it returns if the finger has moved. A road lookup runs alongside, so the preview already goes
    via the larger road the pin will snap to when you let go. */
-const live={on:false,idx:-1,fine:true,snapOk:true,busy:false,dirty:false,snapBusy:false,snap:null,pt:null,lastSnap:0};
+const live={on:false,idx:-1,fine:true,snapOk:true,busy:false,dirty:false,snapBusy:false,snap:null,pt:null,lastSnap:0,raf:0,t:0,previews:0};
 const liveNear=(a,b,px=14)=>!!a&&!!b&&Math.hypot(a[0]-b[0],a[1]-b[1])<px;
 function liveStart(idx,fine,snapOk){
   clearTimeout(rt);S.busy++;                                           // drop any re-route already on its way
   Object.assign(live,{on:true,idx,fine,snapOk,busy:false,dirty:false,snapBusy:false,snap:null,pt:null});
+  local.cache=new Map();
 }
-function liveMove(ll,x,y){if(!live.on)return;S.pts[live.idx]=ll;live.pt=[x,y];live.dirty=true;liveRoute();liveSnap()}
+function liveMove(ll,x,y){
+  if(!live.on)return;S.pts[live.idx]=ll;live.pt=[x,y];live.dirty=true;
+  if(localCovers(S.pts)){                                              // roads are on the phone: redraw every frame, ask the server once the finger pauses
+    if(!live.raf)live.raf=requestAnimationFrame(livePreview);
+    clearTimeout(live.t);live.t=setTimeout(liveRoute,140)}
+  else{liveRoute();liveSnap()}
+}
+function livePreview(){
+  live.raf=0;if(!live.on||!live.pt||!localCovers(S.pts))return;
+  const idx=live.idx,pts=S.pts.slice();
+  if(live.snapOk){const s=local.net.snap(S.pts[idx],SNAP_TIERS,metresPerPx(S.pts[idx][0]),live.fine?0.55:1);
+    if(s){live.snap={at:live.pt.slice(),res:s};pts[idx]=s.ll}}
+  const r=local.net.route(pts,{blocked:localBlocked(),cache:local.cache});
+  if(r&&S.line){S.line.setLatLngs(r.coords);live.previews++}
+}
 async function liveRoute(){
   if(!live.on||live.busy||!live.dirty)return;
   live.busy=true;live.dirty=false;
-  const idx=live.idx,pts=S.pts.slice();
+  const idx=live.idx,pts=S.pts.slice(),at=live.pt&&live.pt.slice(),previewing=localCovers(S.pts);
   if(live.snap&&liveNear(live.snap.at,live.pt))pts[idx]=live.snap.res.ll;
   try{const r=await routeFor(pts,false);
-    if(live.on&&live.idx===idx){S.desired=r;
+    if(live.on&&live.idx===idx&&(!previewing||liveNear(at,live.pt,3))){S.desired=r;   // with local previews running, only a still finger gets the server's line
       if(S.line)S.line.setLatLngs(r.coords);else S.line=L.polyline(r.coords,{color:css('--drawn'),weight:7,opacity:.95,interactive:false}).addTo(map);
       const el=$('tripline');if(el)el.innerHTML=`<b>${fmtTime(r.duration)}</b> · ${fmtDist(r.distance)}`}}
   catch(e){/* keep the last good line; the next move tries again */}
   live.busy=false;if(live.on&&live.dirty)liveRoute();
 }
 async function liveSnap(){
-  if(!live.on||!live.snapOk||live.snapBusy||!live.pt)return;
+  if(!live.on||!live.snapOk||live.snapBusy||!live.pt||localCovers(S.pts))return;
   const idx=live.idx;live.snapBusy=true;
   const wait=live.lastSnap+700-Date.now();if(wait>0)await sleep(wait);   // road lookups: at most about one a second
   if(!live.on||live.idx!==idx){live.snapBusy=false;return}
@@ -465,7 +517,7 @@ async function liveSnap(){
 }
 /* Let go: the pin snaps to its road (reusing the lookup just done if the finger has not moved since) and the route is finalised. */
 function liveEnd(){
-  if(!live.on)return;live.on=false;
+  if(!live.on)return;live.on=false;clearTimeout(live.t);if(live.raf){cancelAnimationFrame(live.raf);live.raf=0}
   const idx=live.idx,cur=S.pts[idx];
   if(!live.snapOk){changed();return}
   if(cur&&live.snap&&liveNear(live.snap.at,live.pt,3))cur.asking=Promise.resolve(live.snap.res);   // only if the finger really was still
@@ -601,6 +653,7 @@ function render(){
       <p class="sub">${av?'Tap a road you would rather not drive on and the route moves off it. Tap a ✕ to undo.'
         :n===0?'Set where you are starting from in the box above, or tap the map.':n===1?'Now set where you are going, in the box above or by tapping the map.'
         :`${touch?'Press and hold the orange line, then drag it':'Drag the orange line'} onto the roads you want. Tap a pin to remove it.`}</p>
+      ${local.status==='loading'&&n>1&&!av?'<p class="hint" id="roads">Loading nearby roads so the line can follow your finger…</p>':''}
       <p class="hint" id="tripline">${S.busy?'Fitting your route to the roads…':R?`<b>${fmtTime(R.duration)}</b> · ${fmtDist(R.distance)}${nz?` · ${nz} road${nz===1?'':'s'} avoided`:''}`:''}</p>
       <div class="row"><button class="btn primary" id="b-build" ${R&&!S.busy&&S.snap?'':'disabled'}>Send to Google or Apple Maps</button></div>
       <div class="row tools"><button class="btn small ${av?'primary':''}" id="b-avoid" ${n>1?'':'disabled'}>${av?'Done marking':'✕ Avoid a road'+(nz?` (${nz})`:'')}</button><button class="btn small" id="b-rev" ${n>1?'':'disabled'}>⇅ Reverse</button><button class="btn small" id="b-clear" ${n||S.toWait?'':'disabled'}>Clear</button></div>
@@ -677,5 +730,5 @@ if(!DEMO&&location.hash.startsWith('#r=')&&openViewer()){}else{render();
 }
 
 /* Handle for the automated tests in tests/ (not used by the app itself). */
-window.DMR={map,S,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
+window.DMR={map,S,local,live,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
 })();

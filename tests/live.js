@@ -108,6 +108,31 @@ module.exports = async function live(browser, url) {
     await ctx.close();
   });
 
+  await S.test('On-phone preview agrees with the routing server (so the line rarely shifts when you let go)', async t => {
+    // The road-data service is unreachable from the test machine, so real Waukesha roads from the fixture stand in for it. Routing is the real server.
+    const { waukeshaOverpass } = require('./fixture'); const body = JSON.stringify(waukeshaOverpass());
+    const { ctx, page, errors } = await openApp(browser, url);
+    await page.route(u => u.host.startsWith('overpass'), route => route.fulfill({ contentType: 'application/json', body }));
+    const cases = [['library to airport', [P.library, P.airport]], ['grocery to courthouse', [P.grocery, P.courthouse]], ['library to Frame Park via hospital', [P.library, P.hospital, P.framePark]], ['South High to airport via Carroll', [P.southHigh, P.carroll, P.airport]], ['hospital to South High', [P.hospital, P.southHigh]]];
+    const scores = [];
+    for (const [name, pts] of cases) {
+      await drawRoute(page, [pts[0], pts[pts.length - 1]]);
+      await page.waitForFunction(() => window.DMR.local.status === 'ready', null, { timeout: 15000 });
+      // Pins in the middle are snapped onto a road first, as they are when the line is dragged in the app.
+      for (let i = 1; i < pts.length - 1; i++) pts[i] = (await page.evaluate(p => window.DMR.snapToRoad(p, false), pts[i])).ll;
+      const server = await drawRoute(page, pts);
+      const mine = await page.evaluate(pts => { const D = window.DMR, t0 = performance.now(), r = D.local.net.route(pts.map(p => p.slice())); return r && { coords: r.coords, ms: performance.now() - t0 }; }, pts);
+      t.check(mine, `${name}: no on-phone route`);
+      const m = matchScore(server.coords, mine.coords); scores.push(m);
+      t.note(`${name}: ${Math.round(m * 100)}% the same roads (${mine.ms.toFixed(1)} ms on the phone)`);
+    }
+    const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+    t.note(`average agreement ${Math.round(avg * 100)}%`);
+    t.check(errors.length === 0, errors.join('; '));
+    if (avg < 0.85) t.warn(`on-phone previews match the server on only ${Math.round(avg * 100)}% of the route on average, so the line will often shift on release`);
+    await ctx.close();
+  });
+
   await S.test('Real search finds a named place', async t => {
     const { ctx, page } = await openApp(browser, url);
     await page.fill('#q-to', 'Frame Park Waukesha');
