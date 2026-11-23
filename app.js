@@ -376,10 +376,14 @@ function setEnd(which,ll,label,q=''){
   changed();
   if(!q)describeEnd(which);                                            // my location or a bare spot: find its address
 }
-/* The location button. The site puts its own plain question first, every time, because a browser already set to "allow"
-   would otherwise hand the location over with no prompt at all. Only "Use my location" goes on to ask the browser. */
-function useMyLocation(){
+/* The location button. If the browser is going to show its own permission prompt, that prompt does the asking. If the
+   browser would hand the location over silently (permission already granted, or it cannot say), the site asks first. */
+async function useMyLocation(){
   if(!navigator.geolocation){toast('This browser cannot share your location.');return}
+  let state='unknown';
+  try{state=(await navigator.permissions.query({name:'geolocation'})).state}catch(e){/* older browsers: ask ourselves */}
+  if(state==='prompt'){locateNow();return}
+  if(state==='denied'){toast('Location is switched off for this site in your browser settings. Type a starting place or tap the map.',5000);return}
   const box=$('ask'),back=document.activeElement;
   const close=()=>{box.hidden=true;document.removeEventListener('keydown',onKey);if(back&&back.focus)back.focus()};
   const onKey=e=>{if(e.key==='Escape')close()};
@@ -712,7 +716,7 @@ function render(){
         :`${touch?'Press and hold the orange line, then drag it':'Drag the orange line'} onto the roads you want. Tap a pin to remove it.`}</p>
       ${local.status==='loading'&&n>1&&!av?'<p class="hint" id="roads">Loading nearby roads so the line can follow your finger…</p>':''}
       <p class="hint" id="tripline">${S.busy?'Fitting your route to the roads…':R?`<b>${fmtTime(R.duration)}</b> · ${fmtDist(R.distance)}${nz?` · ${nz} road${nz===1?'':'s'} avoided`:''}`:''}</p>
-      ${n===0&&!DEMO?'<div class="row"><button class="btn" id="b-here">◎ Start from my location</button></div><p class="hint">Your location is only requested if you tap that button and then confirm.</p>':''}
+      ${n===0&&!DEMO?'<div class="row"><button class="btn" id="b-here">◎ Start from my location</button></div><p class="hint">Your location is only requested if you tap that button.</p>':''}
       <div class="row"><button class="btn primary" id="b-build" ${R&&!S.busy&&S.snap?'':'disabled'}>Send to Google or Apple Maps</button></div>
       <div class="row tools"><button class="btn small ${av?'primary':''}" id="b-avoid" ${n>1?'':'disabled'}>${av?'Done marking':'✕ Avoid a road'+(nz?` (${nz})`:'')}</button><button class="btn small" id="b-rev" ${n>1?'':'disabled'}>⇅ Reverse</button><button class="btn small" id="b-clear" ${n||S.toWait?'':'disabled'}>Clear</button></div>
       ${DEMO?'<p class="hint">Demo map: Waukesha, WI and I-94. The hosted version works anywhere.</p>':''}`;

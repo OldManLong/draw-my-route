@@ -77,8 +77,8 @@ Map data © OpenStreetMap contributors. Leaflet is included under its BSD 2-Clau
 ## Privacy and security
 
 - The site has no accounts, no server of its own and no analytics. Nothing a visitor does is stored by the site.
-- The visitor's location is requested only when they tap the location button and then confirm the site's own
-  "Use your current location?" question, never on opening the page. The browser's own prompt may follow.
+- The visitor's location is requested only when they tap the location button, never on opening the page. The
+  browser's own prompt then asks; if the browser would answer silently, the site asks a short question of its own first.
 - To work, the page sends the points of a trip to the free OpenStreetMap services listed above (routing, road data,
   search and address lookup), and the visitor's location, if they chose to use it, once to the address lookup.
 - A shared link contains the route itself, including where it starts and ends, so anyone given the link can see it.

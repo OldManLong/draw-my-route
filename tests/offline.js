@@ -361,7 +361,7 @@ module.exports = async function offline(browser, url) {
     t.check(idle.asked === 0, `the page asked for the location ${idle.asked} time(s) just by opening`);
     t.check(idle.pts === 0 && idle.from === '', 'a starting point was set without the visitor doing anything');
     t.check(idle.zoom <= 5, 'the map opened zoomed in on a particular place');
-    t.check((await page.textContent('#sheet')).includes('only requested if you tap'), 'the start screen does not say when location is used');
+    t.check((await page.textContent('#sheet')).includes('only requested if you tap that button'), 'the start screen does not say when location is used');
     // typing and searching must not ask either
     await page.fill('#q-to', 'frame park'); await page.waitForSelector('#results button:not([disabled])'); await page.click('#results button');
     await page.waitForTimeout(500);
@@ -370,7 +370,7 @@ module.exports = async function offline(browser, url) {
     await page.click('#b-loc');
     await page.waitForSelector('#ask:not([hidden])');
     const words = await page.textContent('#askbox');
-    t.check(/Use your current location\?/.test(words) && /where you are right now/.test(words) && /does not store/.test(words), 'the question does not say plainly what is asked and what happens to it');
+    t.check(/Use your current location\?/.test(words) && /start of your route/.test(words) && words.length < 120, 'the question is not short and plain: ' + words);
     await page.waitForTimeout(600);
     t.check(await page.evaluate(() => window.__asked) === 0, 'the location was requested before the visitor answered');
     // "Not now" closes it and nothing is asked
@@ -386,6 +386,16 @@ module.exports = async function offline(browser, url) {
     t.check(await page.inputValue('#q-from') === 'My location', 'From box does not say My location');
     t.check(await page.evaluate(() => window.DMR.S.fromQ) === '101 West Main Street, Waukesha, Wisconsin 53186', 'the address of my location was not looked up for the links');
     await ctx.close();
+    // Where the browser has not been told yes or no, its own prompt does the asking: the site shows no question of its own.
+    const fresh = await browser.newContext({ ...require('playwright').devices['iPhone 13'] });
+    await fresh.addInitScript(() => { window.__asked = 0; const g = navigator.geolocation, get = g.getCurrentPosition.bind(g); g.getCurrentPosition = (...a) => { window.__asked++; return get(...a); }; });
+    const p3 = await fresh.newPage(); await p3.route(u => u.origin !== new URL(url).origin, fakeServices());
+    await p3.goto(url); await p3.waitForSelector('#b-loc');
+    const state = await p3.evaluate(async () => (await navigator.permissions.query({ name: 'geolocation' })).state);
+    await p3.click('#b-loc'); await p3.waitForFunction(() => window.__asked === 1, null, { timeout: 5000 });
+    t.note('browser permission state in a fresh visit: ' + state);
+    t.check(state === 'prompt' && await p3.isHidden('#ask'), 'the site showed its own question although the browser was going to ask');
+    await fresh.close();
     // the start screen's own button too
     const two = await browser.newContext({ ...require('playwright').devices['iPhone 13'], geolocation: { latitude: 43.0117, longitude: -88.2315 }, permissions: ['geolocation'] });
     const p2 = await two.newPage(); await p2.route(u => u.origin !== new URL(url).origin, fakeServices({ reverse: houseAt }));
