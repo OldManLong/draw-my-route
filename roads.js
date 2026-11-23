@@ -144,7 +144,9 @@
         pts = arcs[0] & 1 ? slice(eS, S.pos, 0) : slice(eS, S.pos, eS.len);
         for (let i = 1; i < arcs.length; i++) { const g = arcPts(arcs[i]); for (let q = 1; q < g.length; q++) pts.push(g[q]); }
         const tail = best.last & 1 ? slice(eT, eT.len, T.pos) : slice(eT, 0, T.pos); for (let q = 1; q < tail.length; q++) pts.push(tail[q]); }
-      return { pts, time: best.c, last: best.last };
+      // fw: for each road taken in order, whether it is a freeway or a freeway's ramp (to count exits)
+      const fw = best.arc === -1 ? [eS.cls % 10 === 0] : [eS.cls % 10 === 0].concat((() => { const o = []; for (let a = best.arc; a >= 0; a = prev[a]) o.unshift(E[a >> 1].cls % 10 === 0); return o; })(), [eT.cls % 10 === 0]);
+      return { pts, time: best.c, last: best.last, fw };
     }
 
     /* Route through a list of [lat, lon] points. Returns null if any point is off the network or unreachable.
@@ -155,17 +157,17 @@
         const s = (blocked && nearest(toXY(ll), 800, e => !blocked.has(e.id))) || nearest(toXY(ll), 800, null);
         ll._sn = { net: tag, s }; return s; });
       if (S.some(s => !s)) return null;
-      let all = [], time = 0, prevArc = -1;
+      let all = [], time = 0, prevArc = -1, runs = 0, on = false;
       for (let i = 1; i < S.length; i++) {
         const key = cache ? S[i - 1].e + ':' + S[i - 1].pos.toFixed(1) + '>' + S[i].e + ':' + S[i].pos.toFixed(1) + '|' + prevArc : null;
         let r = key ? cache.get(key) : undefined;
         if (r === undefined) { r = leg(S[i - 1], S[i], prevArc, blocked); if (key) cache.set(key, r); }
         if (!r) return null;
         if (all.length) { for (let q = 1; q < r.pts.length; q++) all.push(r.pts[q]); } else all = r.pts.slice();
-        time += r.time; prevArc = r.last;
+        time += r.time; prevArc = r.last; for (const f of r.fw) { if (f && !on) runs++; on = f; }
       }
       let d = 0; for (let i = 1; i < all.length; i++) d += Math.hypot(all[i][0] - all[i - 1][0], all[i][1] - all[i - 1][1]);
-      return { coords: all.map(toLL), distance: d, duration: time };
+      return { coords: all.map(toLL), distance: d, duration: time, exits: Math.max(0, runs - 1) }; // exits: times it leaves the freeway and gets back on
     }
 
     /* Where a dropped pin should land: nearest road, with a head start for larger roads (see SNAP_TIERS in app.js). */
