@@ -116,6 +116,8 @@
     const push = (k, v) => { let i = hk.length; hk.push(k); hv.push(v); while (i > 0) { const p = (i - 1) >> 1; if (hv[p] <= v) break; hk[i] = hk[p]; hv[i] = hv[p]; i = p; } hk[i] = k; hv[i] = v; };
     const pop = () => { const rk = hk[0], lk = hk.pop(), lv = hv.pop(), n = hk.length; if (n) { let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i, mv = lv; if (l < n && hv[l] < mv) { m = l; mv = hv[l]; } if (r < n && hv[r] < mv) m = r; if (m === i) break; hk[i] = hk[m]; hv[i] = hv[m]; i = m; } hk[i] = lk; hv[i] = lv; } return rk; };
 
+    // How far a road turns from end to end, in degrees (left and right cancel).
+    const curl = e => { if (e.curl === undefined) { let tot = 0, prev = null; for (let i = 1; i < e.g.length; i++) { const dx = e.g[i][0] - e.g[i - 1][0], dy = e.g[i][1] - e.g[i - 1][1]; if (!dx && !dy) continue; const h = Math.atan2(dy, dx) * 180 / Math.PI; if (prev !== null) tot += ((h - prev + 540) % 360) - 180; prev = h; } e.curl = tot; } return e.curl; };
     /* Fastest way from snapped point S to snapped point T (A* over road directions, with turn costs). */
     function leg(S, T, prevArc, blocked) {
       const eS = E[S.e], eT = E[T.e], fwdS = eS.one !== -1, bwdS = eS.one !== 1, fwdT = eT.one !== -1, bwdT = eT.one !== 1;
@@ -146,7 +148,9 @@
         const tail = best.last & 1 ? slice(eT, eT.len, T.pos) : slice(eT, 0, T.pos); for (let q = 1; q < tail.length; q++) pts.push(tail[q]); }
       // fw: for each road taken in order, whether it is a freeway or a freeway's ramp (to count exits)
       const fw = best.arc === -1 ? [eS.cls % 10 === 0] : [eS.cls % 10 === 0].concat((() => { const o = []; for (let a = best.arc; a >= 0; a = prev[a]) o.unshift(E[a >> 1].cls % 10 === 0); return o; })(), [eT.cls % 10 === 0]);
-      return { pts, time: best.c, last: best.last, fw };
+      // lk: for each whole road taken in order, how far it turns (degrees, signed) if it is a ramp, else null (to count loop ramps)
+      const lk = []; if (best.arc >= 0) for (let a = best.arc; a >= 0; a = prev[a]) { const e = E[a >> 1]; lk.unshift(e.cls >= 10 ? (a & 1 ? -curl(e) : curl(e)) : null); }
+      return { pts, time: best.c, last: best.last, fw, lk };
     }
 
     /* Route through a list of [lat, lon] points. Returns null if any point is off the network or unreachable.
@@ -157,7 +161,7 @@
         const s = (blocked && nearest(toXY(ll), 800, e => !blocked.has(e.id))) || nearest(toXY(ll), 800, null);
         ll._sn = { net: tag, s }; return s; });
       if (S.some(s => !s)) return null;
-      let all = [], time = 0, prevArc = -1, runs = 0, on = false;
+      let all = [], time = 0, prevArc = -1, runs = 0, on = false, loops = 0, run = null;
       for (let i = 1; i < S.length; i++) {
         const key = cache ? S[i - 1].e + ':' + S[i - 1].pos.toFixed(1) + '>' + S[i].e + ':' + S[i].pos.toFixed(1) + '|' + prevArc : null;
         let r = key ? cache.get(key) : undefined;
@@ -165,9 +169,10 @@
         if (!r) return null;
         if (all.length) { for (let q = 1; q < r.pts.length; q++) all.push(r.pts[q]); } else all = r.pts.slice();
         time += r.time; prevArc = r.last; for (const f of r.fw) { if (f && !on) runs++; on = f; }
+        for (const t of r.lk) { if (t === null) { if (run !== null && Math.abs(run) >= 200) loops++; run = null; } else run = (run || 0) + t; } // a ramp in several pieces is one ramp
       }
       let d = 0; for (let i = 1; i < all.length; i++) d += Math.hypot(all[i][0] - all[i - 1][0], all[i][1] - all[i - 1][1]);
-      return { coords: all.map(toLL), distance: d, duration: time, exits: Math.max(0, runs - 1) }; // exits: times it leaves the freeway and gets back on
+      return { coords: all.map(toLL), distance: d, duration: time, exits: Math.max(0, runs - 1), loops: loops + (run !== null && Math.abs(run) >= 200 ? 1 : 0) }; // loops: cloverleaf loop ramps used; // exits: times it leaves the freeway and gets back on
     }
 
     /* Where a dropped pin should land: nearest road, with a head start for larger roads (see SNAP_TIERS in app.js). */
