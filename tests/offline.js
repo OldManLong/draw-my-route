@@ -106,7 +106,7 @@ module.exports = async function offline(browser, url) {
     t.check((await page.textContent('.leaflet-control-attribution')).includes('© OpenStreetMap contributors'), 'the credit wording is wrong');
     await page.click('#credits summary');
     const words = await page.textContent('#credits');
-    for (const who of ['OpenStreetMap', 'Open Database Licence', 'OSRM', 'Valhalla', 'FOSSGIS', 'Photon', 'Nominatim', 'Overpass', 'Leaflet']) t.check(words.includes(who), who + ' is not credited');
+    for (const who of ['Alaina Salas', 'OpenStreetMap', 'Open Database Licence', 'OSRM', 'Valhalla', 'FOSSGIS', 'Photon', 'Nominatim', 'Overpass', 'Leaflet']) t.check(words.includes(who), who + ' is not credited');
     t.check(/not connected with Google or Apple/.test(words), 'the site does not say it is unconnected with Google and Apple');
     // the map's credit stays on screen while a route is drawn and on the result screen
     await drawRoute(page, [A, MID, B]);
@@ -755,6 +755,63 @@ module.exports = async function offline(browser, url) {
     t.check(Math.abs(at[1] - far[1]) < 8, `pin ended ${Math.round(Math.abs(at[1] - far[1]))} px from where it was dropped, expected to stay put`);
     t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
+  });
+
+  await S.test('A pin is a pull, not a stop: on a divided road it lands on the side the route flows along', async t => {
+    // Two carriageways 30 m apart along latitude 43.0130: the north one runs the wrong way for this trip.
+    const NORTH = BIG_ROAD_LAT + 0.00027, SOUTH = BIG_ROAD_LAT;
+    const twoSides = (route, u) => json(route, valhallaQuery(u).locations.map((l, i) => ({ edges: i === 0
+      ? [edge(NORTH, l.lon, Math.abs(l.lat - NORTH) * 110540, 'motorway', 'I 43'), edge(SOUTH, l.lon, Math.abs(l.lat - SOUTH) * 110540, 'motorway', 'I 43'), { ...edge(SOUTH, l.lon, 1, 'motorway', 'ramp'), edge: { classification: { classification: 'motorway', link: true } } }]
+      : l.search_filter ? [] : [edge(l.lat - 0.0001, l.lon, 11, 'residential', 'Side Street')] })));
+    // The stand-in routing server: going through a point on the north side costs ten minutes more (off at the next exit and back).
+    const asked = [];
+    const osrm = (route, u) => { const pts = u.split('/driving/')[1].split('?')[0].split(';').map(s => s.split(',').map(Number)); const wrong = pts.slice(1, -1).some(p => Math.abs(p[1] - NORTH) < 0.00005); asked.push(pts.length);
+      return json(route, { code: 'Ok', routes: [{ distance: 1000, duration: 100 + (wrong ? 600 : 0), geometry: { coordinates: pts }, legs: [{ steps: [{ intersections: [] }] }] }] }); };
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ locate: twoSides, osrm }) });
+    await drawRoute(page, [A, B]); await page.waitForTimeout(600);
+    const px = ll => page.evaluate(ll => { const p = window.DMR.map.latLngToContainerPoint(ll); return [p.x, p.y]; }, ll);
+    const lonMid = (A[1] + B[1]) / 2, start = await px([A[0], lonMid]), north = await px([NORTH, lonMid]);
+    // let go just beyond the north side: the nearest road is the wrong-way one
+    await page.mouse.move(start[0], start[1]); await page.mouse.down();
+    for (let i = 1; i <= 6; i++) await page.mouse.move(start[0], start[1] + (north[1] - 3 - start[1]) * i / 6, { steps: 2 });
+    await page.mouse.up();
+    await page.waitForFunction(() => window.DMR.S.pts.length === 3 && window.DMR.S.pts[1].snapped && !window.DMR.S.busy && window.DMR.S.desired.coords.length === 3, null, { timeout: 12000 });
+    const pin = await page.evaluate(() => window.DMR.S.pts[1]);
+    t.note(`dropped nearest the wrong-way side; pin landed at latitude ${pin[0].toFixed(5)} (right side ${SOUTH}, wrong side ${NORTH.toFixed(5)})`);
+    t.check(Math.abs(pin[0] - SOUTH) < 1e-6, 'the pin landed on the side that sends the route off and back');
+    t.check((await page.textContent('#toast')).includes('I 43'), 'the driver was not told which road the pin is on');
+    t.check(await page.evaluate(() => window.DMR.S.desired.duration) < 200, 'the route through the pin still takes the ten-minute detour');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('A pin is a pull: on real freeway data, a drop beside the freeway never sends the route off and back', async t => {
+    // No browser needed: the road engine on the real Waukesha roads. For each stretch of one-way freeway, drop a pin 40 m
+    // to either side of its middle and route from its start, through the pin, to its end.
+    const fs = require('fs'); const win = {}; const src = fs.readFileSync(path.join(__dirname, '..', 'roads.js'), 'utf8'); new Function('window', src)(win);
+    const g = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'waukesha-roads.json'), 'utf8')), net = win.DMRRoads.buildNet(waukeshaOverpass().elements, g.ref);
+    const KX = 111320 * Math.cos(g.ref[0] * Math.PI / 180), KY = 110540, ll = (x, y) => [g.ref[0] - y / KY, g.ref[1] + x / KX];
+    const tiers = [{ name: 'main', head: 30, reach: 70, filter: 1 }, { name: 'medium', head: 18, reach: 45, filter: 1 }, { name: 'any', head: 0, reach: Infinity, filter: null }];
+    let tried = 0, naiveBad = 0, pullBad = 0, onFreeway = 0;
+    g.e.forEach(([a, b, nm, cls, mph, one, mid]) => {
+      if (cls !== 0 || one !== 1 || mid.length) return;
+      const ax = g.n[2 * a], ay = g.n[2 * a + 1], bx = g.n[2 * b], by = g.n[2 * b + 1], L = Math.hypot(bx - ax, by - ay); if (L < 400) return;
+      const prev = ll(ax, ay), next = ll(bx, by), direct = net.route([prev.slice(), next.slice()]);
+      if (!direct || direct.distance > L * 1.02 + 5 || direct.duration > L / 20) return;     // only stretches the engine itself drives straight down at speed
+      for (const side of [40, -40]) {
+        const drop = ll((ax + bx) / 2 - (by - ay) / L * side, (ay + by) / 2 + (bx - ax) / L * side), s = net.snap(drop, tiers, 7, 1); if (!s) continue;
+        tried++; if (s.tier === 'main') onFreeway++;
+        const through = c => { const r = net.route([prev.slice(), c, next.slice()]); return r ? r.duration : Infinity; };
+        if (through(s.ll) > direct.duration + 30) naiveBad++;
+        let best = Infinity, cur = null; for (const c of (s.choices || [{ ll: s.ll }])) { const d = through(c.ll); if (cur === null || d < cur - 5) cur = d; } best = cur;
+        if (best > direct.duration + 30) pullBad++;
+      }
+    });
+    t.note(`${tried} drops beside the freeway: landing on the nearest road sends ${naiveBad} of them off and back; as a pull, ${pullBad}`);
+    t.check(tried >= 10, 'too few freeway stretches found to test');
+    t.check(onFreeway === tried, `${tried - onFreeway} drops beside the freeway did not land on the freeway at all`);
+    t.check(naiveBad >= 3, 'the test no longer shows the problem it guards against');
+    t.check(pullBad === 0, `${pullBad} drops still send the route off the freeway and back`);
   });
 
   await S.test('Road lookup unavailable: the pin simply stays where it was dropped', async t => {

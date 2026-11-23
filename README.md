@@ -10,6 +10,8 @@ How it works for the person using it:
 1. Set where you are starting and where you are going. The fastest route appears.
    The site only asks for your location if you tap the location button; it never asks just because the page opened.
 2. Drag the orange line onto the roads you want. On a phone, press and hold the line first, then drag.
+   A pin means "take this road", not "stop here": it lands on the road you dragged to, freeways included, and on
+   the side of it that the route flows along, so the route never leaves a freeway just to touch a pin.
    Taps never add pins to a route, and neither does a press that isn't followed by a pull, so a pin cannot be
    added by accident. Typing a destination searches near the start first and lists the nearest matches on top.
    While you drag, the route follows your finger. The page downloads the roads around your trip
@@ -21,7 +23,7 @@ How it works for the person using it:
    stand-in for what Google and Apple will choose, and then to work out the stops. If that line uses
    different side streets from the one you shaped, the result screen says so.
    Where you let go, the route snaps to a road, and larger roads are favoured: a drop near a main road lands
-   on it instead of on the side street or car park beside it. Freeways get no such favour.
+   on it instead of on the side street or car park beside it. Ramps are never favoured.
    Or tap **Avoid a road** and tap any road you would rather not drive on; the route moves off it.
 3. Tap **Send to Google or Apple Maps**. You can open the route yourself or share it, with a note, with someone else.
 
@@ -83,6 +85,8 @@ If the site gets real traffic, switch to a provider with a free tier meant for a
 
 ## Credits
 
+- **The idea: Alaina Salas.** She wanted a way to choose the roads she takes instead of the ones a maps app picks,
+  and asked for this to be built.
 - Map, road, place and address data: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors, under the
   Open Database Licence. The credit is shown on the map on every screen, linked to that page, as the licence asks.
 - Map pictures: OpenStreetMap's tile servers. Routing: [OSRM](https://project-osrm.org/) and

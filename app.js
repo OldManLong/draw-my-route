@@ -466,35 +466,67 @@ function localBlocked(){const key=S.zones.map(z=>z.join(',')).join(';');
 /* ---------------- Snap to roads, favouring larger ones ---------------- */
 /* Where a dragged or tapped route pin lands. The nearest road of any size is always a candidate, but main roads get a
    head start measured in screen pixels (a finger is imprecise), so dropping near a main road lands on it instead
-   of on the alley or car park beside it. Freeways and ramps get no head start: you only land on one by aiming at it. */
+   of on the alley or car park beside it. Freeways count as main roads: dragging the line onto one means "take it".
+   Ramps never get a head start. */
 const SNAP_TIERS=[
-  {name:'main',  head:30, reach:70, filter:{min_road_class:'primary', max_road_class:'trunk',exclude_ramp:true}},   // arterials and highways that are not freeways
-  {name:'medium',head:18, reach:45, filter:{min_road_class:'tertiary',max_road_class:'trunk',exclude_ramp:true}},   // collector roads
+  {name:'main',  head:30, reach:70, filter:{min_road_class:'primary', exclude_ramp:true}},   // freeways, highways and arterials (never their ramps)
+  {name:'medium',head:18, reach:45, filter:{min_road_class:'tertiary',exclude_ramp:true}},   // collector roads and up
   {name:'any',   head:0,  reach:Infinity, filter:null},
 ];
+const SNAP_FAR=500,SNAP_SIDE=120;                         // metres: how far to look for main roads; how much farther than the nearest still counts as "right there"
 async function snapToRoad(ll,fine){
   const raw={ll,name:'',tier:'none'};
   if(DEMO)return raw;
   const mpp=metresPerPx(ll[0]),k=fine?0.55:1;                          // a mouse is more precise than a finger
   if(localCovers([ll])){const s=local.net.snap(ll,SNAP_TIERS,mpp,k);if(s)return s}   // roads already on the phone: answer at once
   const at={lat:+ll[0].toFixed(6),lon:+ll[1].toFixed(6)};
-  const q={locations:SNAP_TIERS.map(t=>t.filter?{...at,search_filter:t.filter}:at),costing:'auto',verbose:true};
+  // For the main roads, every one within reach is asked for (the two directions of a freeway are separate roads).
+  const q={locations:SNAP_TIERS.map((t,i)=>t.filter?{...at,search_filter:t.filter,...(i===0?{radius:Math.round(Math.min(t.reach*k*mpp,SNAP_FAR))}:{})}:at),costing:'auto',verbose:true};
   const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),3000);
   try{
     const r=await fetch('https://valhalla1.openstreetmap.de/locate?json='+encodeURIComponent(JSON.stringify(q)),{signal:ctl.signal});
     if(!r.ok)return raw;
     const j=await r.json();let best=null;
-    SNAP_TIERS.forEach((t,i)=>{const e=j[i]&&j[i].edges&&j[i].edges[0];if(!e||typeof e.distance!=='number')return;
+    const usable=e=>e&&typeof e.distance==='number'&&typeof e.correlated_lat==='number'&&!(e.edge&&e.edge.classification&&e.edge.classification.link);
+    const nameOf=e=>(e.edge_info&&e.edge_info.names&&e.edge_info.names[0])||'';
+    SNAP_TIERS.forEach((t,i)=>{const list=((j[i]&&j[i].edges)||[]).filter(usable).sort((a,b)=>a.distance-b.distance),e=list[0];if(!e)return;
       const px=e.distance/mpp;if(px>t.reach*k||(t.filter&&e.distance>1500))return;
-      const score=px-t.head*k;if(!best||score<best.score)best={score,ll:[e.correlated_lat,e.correlated_lon],name:(e.edge_info&&e.edge_info.names&&e.edge_info.names[0])||'',tier:t.name}});
+      const score=px-t.head*k;if(best&&score>=best.score)return;
+      best={score,ll:[e.correlated_lat,e.correlated_lon],name:nameOf(e),tier:t.name};
+      if(i===0){const seen=new Set();                                     // the other main roads right there, each once
+        // one choice per road and direction: three pieces of the same carriageway must not crowd out the other direction
+        best.choices=list.filter(c=>c.distance<=e.distance+SNAP_SIDE).filter(c=>{const key=nameOf(c)+'|'+(typeof c.heading==='number'?Math.round(c.heading/90)%4:c.correlated_lat.toFixed(5)+','+c.correlated_lon.toFixed(5));if(seen.has(key))return false;seen.add(key);return true})
+          .slice(0,4).map(c=>({ll:[c.correlated_lat,c.correlated_lon],name:nameOf(c),d:c.distance}))}});
     return best||raw;
   }catch(e){return raw}
   finally{clearTimeout(timer)}
 }
+/* A pin is a pull, not a stop: it says "go along this road", not "visit this exact spot". So where several roads of the
+   same size lie right where the pin was dropped (above all the two directions of a freeway, or a road crossing it), the
+   pin goes on the one the route flows through: the one that makes the trip from the pin before to the pin after quickest.
+   Landing on the wrong side of a freeway would otherwise send the route off at the next exit and back again. */
+const PULL_TIE=5;                                         // seconds: a choice must be this much quicker to beat a nearer one
+function pullLocal(prev,next,s){
+  if(!s||!s.choices||s.choices.length<2||!prev||!next)return s;
+  let best=null;
+  for(const c of s.choices){const r=local.net.route([prev,c.ll,next],{blocked:localBlocked()}),dur=r?r.duration:Infinity;
+    if(!best||dur<best.dur-PULL_TIE)best={dur,c}}
+  return best&&isFinite(best.dur)?{...s,ll:best.c.ll,name:best.c.name||s.name}:s;
+}
+async function pullChoice(idx,s){
+  const prev=S.pts[idx-1],next=S.pts[idx+1];
+  if(!s||!s.choices||s.choices.length<2||!prev||!next)return s;
+  if(localCovers([prev,next].concat(s.choices.map(c=>c.ll))))return pullLocal(prev,next,s);
+  let best=null;
+  for(const c of s.choices){let dur=Infinity;
+    try{dur=(await route([prev,c.ll,next])).duration}catch(e){/* that choice cannot be judged: leave it out */}
+    if(!best||dur<best.dur-PULL_TIE)best={dur,c}}
+  return best&&isFinite(best.dur)?{...s,ll:best.c.ll,name:best.c.name||s.name}:s;
+}
 /* Snap route pin number idx. Returns false if the pin moved again while we were asking. */
 async function snapVia(idx,fine,announce){
   const before=S.pts[idx];if(!before||before.snapped)return true;
-  if(!before.asking)before.asking=snapToRoad(before,fine);              // a drop right after a pause shares the one request
+  if(!before.asking)before.asking=snapToRoad(before,fine).then(s=>pullChoice(idx,s));   // a drop right after a pause shares the one request
   const s=await before.asking;
   if(S.pts[idx]===before){const ll=[s.ll[0],s.ll[1]];ll.snapped=true;S.pts[idx]=ll}
   else if(!S.pts[idx]||!S.pts[idx].snapped)return false;
@@ -523,7 +555,7 @@ function liveMove(ll,x,y){
 function livePreview(){
   live.raf=0;if(!live.on||!live.pt||!localCovers(S.pts))return;
   const idx=live.idx,pts=S.pts.slice();
-  if(live.snapOk){const s=local.net.snap(S.pts[idx],SNAP_TIERS,metresPerPx(S.pts[idx][0]),live.fine?0.55:1);
+  if(live.snapOk){const s=pullLocal(S.pts[idx-1],S.pts[idx+1],local.net.snap(S.pts[idx],SNAP_TIERS,metresPerPx(S.pts[idx][0]),live.fine?0.55:1));
     if(s){live.snap={at:live.pt.slice(),res:s};pts[idx]=s.ll}}
   const r=local.net.route(pts,{blocked:localBlocked(),cache:local.cache});
   if(r&&S.line){S.line.setLatLngs(r.coords);live.previews++}
@@ -556,7 +588,7 @@ function liveEnd(){
   if(!live.on)return;live.on=false;clearTimeout(live.t);if(live.raf){cancelAnimationFrame(live.raf);live.raf=0}
   const idx=live.idx,cur=S.pts[idx];
   if(!live.snapOk){changed();return}
-  if(cur&&live.snap&&liveNear(live.snap.at,live.pt,3))cur.asking=Promise.resolve(live.snap.res);   // only if the finger really was still
+  if(cur&&live.snap&&liveNear(live.snap.at,live.pt,3))cur.asking=pullChoice(idx,live.snap.res);   // only if the finger really was still
   drawPoints();snapVia(idx,live.fine,true).then(ok=>{if(ok)changed()});
 }
 
@@ -747,6 +779,7 @@ async function nominatimSearch(q,near,seq){
 /* Who makes this possible. OpenStreetMap's licence requires its credit (also on the map itself, on every screen);
    the others are free services run by volunteers and companies, credited here by name. */
 const CREDITS=`<details class="opts" id="credits"><summary>About and credits</summary>
+  <p class="hint">Draw My Route was <b>Alaina Salas</b>'s idea: a way to choose the roads you take, instead of the ones a maps app picks for you.</p>
   <p class="hint">Map, roads, places and addresses: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors, under the Open Database Licence.</p>
   <p class="hint">Map pictures from <a href="https://www.openstreetmap.org/" target="_blank" rel="noopener">OpenStreetMap</a>. Routing by <a href="https://project-osrm.org/" target="_blank" rel="noopener">OSRM</a> and <a href="https://valhalla.github.io/valhalla/" target="_blank" rel="noopener">Valhalla</a> (servers run by <a href="https://www.fossgis.de/" target="_blank" rel="noopener">FOSSGIS</a>). Place search by <a href="https://photon.komoot.io/" target="_blank" rel="noopener">Photon</a> (komoot) and <a href="https://nominatim.org/" target="_blank" rel="noopener">Nominatim</a>. Road data through the <a href="https://overpass-api.de/" target="_blank" rel="noopener">Overpass API</a>. Map display by <a href="https://leafletjs.com/" target="_blank" rel="noopener">Leaflet</a>.</p>
   <p class="hint">Draw My Route is not connected with Google or Apple. It only builds links that open in their maps apps.</p>
@@ -871,5 +904,5 @@ if(!DEMO&&location.hash.startsWith('#r=')&&openViewer()){}else{render();
 }
 
 /* Handle for the automated tests in tests/ (not used by the app itself). */
-window.DMR={map,S,local,live,lineMatch,placeText,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
+window.DMR={map,S,local,live,lineMatch,placeText,pullChoice,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
 })();

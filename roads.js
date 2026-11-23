@@ -169,13 +169,34 @@
     }
 
     /* Where a dropped pin should land: nearest road, with a head start for larger roads (see SNAP_TIERS in app.js). */
-    const TIER_OK = { main: e => e.cls === 1 || e.cls === 2, medium: e => e.cls >= 1 && e.cls <= 4, any: null };
+    /* Freeways count as main roads: dragging the line onto one means "take it". Ramps and slip roads (class 10 and up) never do. */
+    const TIER_OK = { main: e => e.cls <= 2, medium: e => e.cls <= 4, any: null };
+    /* The nearest point on every road piece within `reach` metres of p that `ok` accepts, nearest first. */
+    function nearestEach(p, reach, ok) {
+      const best = new Map(), ci = Math.floor(p[0] / SC), cj = Math.floor(p[1] / SC), R = Math.ceil(reach / SC);
+      for (let i = ci - R; i <= ci + R; i++) for (let j = cj - R; j <= cj + R; j++) {
+        const L = SG.get(i + ',' + j); if (!L) continue;
+        for (let q = 0; q < L.length; q += 2) { const id = L[q], s = L[q + 1], e = E[id]; if (ok && !ok(e)) continue;
+          const a = e.g[s], b = e.g[s + 1], dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy;
+          let t = L2 ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2 : 0; t = Math.max(0, Math.min(1, t));
+          const x = a[0] + t * dx, y = a[1] + t * dy, d = Math.hypot(p[0] - x, p[1] - y);
+          // one hit per road and direction of travel, so several pieces of one carriageway count once
+          const key = e.name + '|' + (e.one === 0 ? 'both' : Math.round((Math.atan2(dy, dx) * (e.one === -1 ? -1 : 1) + (e.one === -1 ? Math.PI : 0)) / (Math.PI / 2)) & 3);
+          const had = best.get(key); if (d <= reach && (!had || d < had.d)) best.set(key, { d, e: id, xy: [x, y] }); }
+      }
+      return [...best.values()].sort((a, b) => a.d - b.d);
+    }
+    /* Where a dropped pin should land: nearest road, with a head start for larger roads (see SNAP_TIERS in app.js).
+       `choices` are the other roads of that size right there (within SIDE metres more than the nearest): the two
+       directions of a freeway, a road crossing it. The app picks among them the one the route flows through. */
+    const SIDE = 120, CHOICES = 8;
     function snap(ll, tiers, mpp, k) {
       const p = toXY(ll); let best = null;
       for (const t of tiers) {
         const reach = t.filter ? Math.min(t.reach * k * mpp, 600) : 600, hit = nearest(p, reach, TIER_OK[t.name]); if (!hit) continue;
-        const score = hit.d / mpp - t.head * k; if (!best || score < best.score) best = { score, ll: toLL(hit.xy), name: names[E[hit.e].name], tier: t.name };
+        const score = hit.d / mpp - t.head * k; if (!best || score < best.score) best = { score, ll: toLL(hit.xy), name: names[E[hit.e].name], tier: t.name, d: hit.d };
       }
+      if (best && best.tier !== 'any') best.choices = nearestEach(p, best.d + SIDE, TIER_OK[best.tier]).slice(0, CHOICES).map(h => ({ ll: toLL(h.xy), name: names[E[h.e].name], d: h.d }));
       return best;
     }
     /* Road stretches within `radius` metres of any of the given points: used to keep previews off roads marked to avoid. */
