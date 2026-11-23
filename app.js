@@ -82,10 +82,20 @@ async function getJSON(url,tries=0){
   finally{clearTimeout(timer)}
 }
 let lastCall=0;
-const LOOP_TURN=200,LOOP_LONG=1500;                  // degrees a ramp must turn to count as a loop; metres: longer than this is not a ramp
-function turnOf(c){let tot=0,prev=null;const k=Math.cos(c[0][0]*Math.PI/180);
-  for(let i=1;i<c.length;i++){const dx=(c[i][1]-c[i-1][1])*k,dy=c[i][0]-c[i-1][0];if(!dx&&!dy)continue;const h=Math.atan2(dx,dy)*180/Math.PI;
-    if(prev!==null)tot+=((h-prev+540)%360)-180;prev=h}return tot}
+/* Cloverleaf loop ramps on a route, found from its shape alone (so it works for every routing engine): a stretch no longer
+   than LOOP_LONG metres that turns LOOP_TURN degrees or more, one way. A flyover or an ordinary ramp turns 90 or so, a
+   U-turn or hairpin 180, and a roundabout is shorter than LOOP_SHORT. Returns the middle point of each loop. */
+const LOOP_TURN=200,LOOP_LONG=700,LOOP_SHORT=150;
+function loopsIn(c){
+  const D=[0],T=[0];let prev=null,k=Math.cos(c[0][0]*Math.PI/180);
+  for(let i=1;i<c.length;i++){const dx=(c[i][1]-c[i-1][1])*k,dy=c[i][0]-c[i-1][0];let t=T[i-1];
+    if(dx||dy){const h=Math.atan2(dx,dy)*180/Math.PI;if(prev!==null)t+=((h-prev+540)%360)-180;prev=h}
+    T.push(t);D.push(D[i-1]+Math.hypot(dx,dy)*110540)}
+  const out=[];
+  for(let i=0;i<c.length;i++){for(let j=i+1;j<c.length&&D[j]-D[i]<=LOOP_LONG;j++){
+    if(Math.abs(T[j]-T[i])>=LOOP_TURN&&D[j]-D[i]>=LOOP_SHORT){out.push(c[(i+j)>>1]);i=j;break}}}
+  return out;
+}
 async function osrmRoute(pts){
   const wait=lastCall+350-Date.now();if(wait>0)await sleep(wait);lastCall=Date.now();
   const s=pts.map(p=>p[1].toFixed(6)+','+p[0].toFixed(6)).join(';');
@@ -94,13 +104,10 @@ async function osrmRoute(pts){
   const rt=j.routes[0];
   // exits: how many times the route comes off the freeway and later gets back on. Each time it gets on from an ordinary
   // road the directions say "on ramp" (going from one freeway to another they say "merge" or "fork"), so: on-ramps, less the first.
-  // loops: cloverleaf loop ramps on the route. A loop ramp is a short piece of road that turns most of a full circle
-  // (LOOP_TURN degrees or more; a flyover or an ordinary ramp turns 90 or so). Roundabouts are not ramps.
-  let hwy=false,ramps=0,loops=0;
+  let hwy=false,ramps=0;
   rt.legs.forEach(l=>l.steps.forEach(st=>{const ty=st.maneuver&&st.maneuver.type;if(ty==='on ramp')ramps++;
-    if(st.distance<LOOP_LONG&&st.geometry&&ty!=='roundabout'&&ty!=='rotary'&&ty!=='exit roundabout'&&ty!=='exit rotary'&&Math.abs(turnOf(st.geometry.coordinates.map(c=>[c[1],c[0]])))>=LOOP_TURN)loops++;
     (st.intersections||[]).forEach(i=>{if((i.bearings||[]).length>=3)addInter([i.location[1],i.location[0]]);if((i.classes||[]).includes('motorway'))hwy=true})}));
-  return {coords:rt.geometry.coordinates.map(c=>[c[1],c[0]]),distance:rt.distance,duration:rt.duration,hwy,exits:Math.max(0,ramps-1),loops};
+  const out={coords:rt.geometry.coordinates.map(c=>[c[1],c[0]]),distance:rt.distance,duration:rt.duration,hwy,exits:Math.max(0,ramps-1)};const at=loopsIn(out.coords);out.loops=at.length;out.loopAt=at;return out;
 }
 
 /* Hosted, avoid-highways predictions: public Valhalla router (OSRM's public server can't avoid highways). */
@@ -415,9 +422,21 @@ async function routeFor(pts,warn){
   if(!S.snap){let d=0;for(let i=1;i<pts.length;i++)d+=hav(pts[i-1],pts[i]);return {coords:pts.slice(),distance:d,duration:d/13}}
   if(S.zones.length&&!DEMO){
     // Roads marked ✕: ask the engine that can keep off given spots. If it can't answer, fall back and say so.
-    try{return await valhallaRoute(pts,false,S.zones)}
+    try{const v=await valhallaRoute(pts,false,S.zones);const at=loopsIn(v.coords);v.loops=at.length;v.loopAt=at;return warn?aroundLoops(pts,v):v}
     catch(e){if(warn)toast("Couldn't route around your ✕ marks just now. Drag the line off those roads instead.",4500);return route(pts)}}
-  return route(pts);
+  const r=await route(pts);
+  return warn&&!DEMO?aroundLoops(pts,r):r;                   // only for the finished line, not while a finger is still dragging
+}
+/* Cloverleaf loop ramps are worth going out of the way to miss: get on or off the freeway from another direction, or at
+   the next interchange. The route's loops are marked as places to keep off and the other engine is asked again; its
+   answer is taken if it has fewer loops and costs no more than LOOP_DETOUR seconds for each loop it misses. */
+const LOOP_DETOUR=300,LOOP_MOST=8;
+async function aroundLoops(pts,r){
+  if(!r||!r.loops||r.loops>LOOP_MOST)return r;
+  try{const v=await valhallaRoute(pts,false,S.zones.concat(r.loopAt));const at=loopsIn(v.coords);v.loops=at.length;v.loopAt=at;
+    if(v.loops<r.loops&&v.duration<=r.duration+LOOP_DETOUR*(r.loops-v.loops)){v.dodged=r.loops-v.loops;return v}}
+  catch(e){/* the other engine could not answer: keep the route as it is */}
+  return r;
 }
 function clearLine(){if(S.line){map.removeLayer(S.line);S.line=null}if(S.grab){map.removeLayer(S.grab);S.grab=null}}
 async function recompute(){
@@ -645,7 +664,7 @@ async function liveRoute(){
   try{const r=await routeFor(pts,false);
     if(live.on&&live.idx===idx&&(!previewing||liveNear(at,live.pt,3))){S.desired=r;   // with local previews running, only a still finger gets the server's line
       if(S.line)S.line.setLatLngs(r.coords);else S.line=L.polyline(r.coords,{color:css('--drawn'),weight:7,opacity:.95,interactive:false}).addTo(map);
-      const el=$('tripline');if(el)el.innerHTML=`<b>${fmtTime(r.duration)}</b> · ${fmtDist(r.distance)}${r.loops?` · ${r.loops} loop ramp${r.loops===1?'':'s'}`:''}`}}
+      const el=$('tripline');if(el)el.innerHTML=`<b>${fmtTime(r.duration)}</b> · ${fmtDist(r.distance)}${r.loops?` · ${r.loops} loop ramp${r.loops===1?'':'s'}`:''}${r.dodged?` · goes round ${r.dodged} loop ramp${r.dodged===1?'':'s'}`:''}`}}
   catch(e){/* keep the last good line; the next move tries again */}
   live.busy=false;if(live.on&&live.dirty)liveRoute();
 }
@@ -882,7 +901,7 @@ function render(){
         :n===0?'Type where you are starting from in the box above, tap the map, or use your location.':n===1?'Now set where you are going, in the box above or by tapping the map.'
         :`${touch?'Press and hold the orange line, then drag it':'Drag the orange line'} onto the roads you want. Tap a pin to remove it.`}</p>
       ${local.status==='loading'&&n>1&&!av?'<p class="hint" id="roads">Loading nearby roads so the line can follow your finger…</p>':''}
-      <p class="hint" id="tripline">${S.busy?'Fitting your route to the roads…':R?`<b>${fmtTime(R.duration)}</b> · ${fmtDist(R.distance)}${R.loops?` · ${R.loops} loop ramp${R.loops===1?'':'s'}`:''}${nz?` · ${nz} road${nz===1?'':'s'} avoided`:''}`:''}</p>
+      <p class="hint" id="tripline">${S.busy?'Fitting your route to the roads…':R?`<b>${fmtTime(R.duration)}</b> · ${fmtDist(R.distance)}${R.loops?` · ${R.loops} loop ramp${R.loops===1?'':'s'}`:''}${R.dodged?` · goes round ${R.dodged} loop ramp${R.dodged===1?'':'s'}`:''}${nz?` · ${nz} road${nz===1?'':'s'} avoided`:''}`:''}</p>
       ${n===0&&!DEMO?'<div class="row"><button class="btn" id="b-here">◎ Start from my location</button></div><p class="hint">Your location is only requested if you tap that button.</p>':''}
       <div class="row"><button class="btn primary" id="b-build" ${R&&!S.busy&&S.snap?'':'disabled'}>Send to Google or Apple Maps</button></div>
       <div class="row tools"><button class="btn small ${av?'primary':''}" id="b-avoid" ${n>1?'':'disabled'}>${av?'Done marking':'✕ Avoid a road'+(nz?` (${nz})`:'')}</button><button class="btn small" id="b-rev" ${n>1?'':'disabled'}>⇅ Reverse</button><button class="btn small" id="b-clear" ${n||S.toWait?'':'disabled'}>Clear</button></div>
