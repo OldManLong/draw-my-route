@@ -73,6 +73,15 @@ If the site gets real traffic, switch to a provider with a free tier meant for a
 
 Map data © OpenStreetMap contributors. Leaflet is included under its BSD 2-Clause licence (see `LEAFLET-LICENSE.txt`).
 
+## Privacy and security
+
+- The site has no accounts, no server of its own and no analytics. Nothing a visitor does is stored by the site.
+- To work, the page sends the points of a trip to the free OpenStreetMap services listed above (routing, road data,
+  search and address lookup), and the visitor's location, if they allow it, once to the address lookup.
+- A shared link contains the route itself, including where it starts and ends, so anyone given the link can see it.
+- Whatever a shared link carries is checked before use and only ever shown as plain text.
+- A content security policy in `index.html` lets the page run only its own scripts and talk only to the services it uses.
+
 ## Testing
 
 The `tests/` folder holds an automated test suite. It starts a private copy of the site on this computer only

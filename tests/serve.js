@@ -8,7 +8,7 @@ function start(port = 8123) {
     let p = decodeURIComponent(req.url.split('?')[0]);
     if (p.endsWith('/')) p += 'index.html';
     const file = path.join(ROOT, p);
-    if (!file.startsWith(ROOT) || p.startsWith('/tests') || p.startsWith('/.') || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end('Not found'); return; }
+    if (!(file + path.sep).startsWith(ROOT + path.sep) || p.startsWith('/tests') || p.startsWith('/.') || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end('Not found'); return; }
     res.writeHead(200, { 'content-type': TYPES[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' });
     res.end(fs.readFileSync(file));
   });

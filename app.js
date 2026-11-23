@@ -728,7 +728,8 @@ function render(){
       ${parts.length>1?`<p class="hint" style="margin:0 0 8px">Your route needs more than ${PART_MAX} stops, so it's split into ${parts.length} parts. Open part 2 when you reach the end of part 1 (⇥).</p>`:''}
       ${linkBlocks(r)}
       ${DEMO?'':`<input class="field" id="f-note" maxlength="140" placeholder="Add a note for whoever gets this (optional)" aria-label="Note to include when sharing" value="${esc(S.note)}">
-      <div class="row"><button class="btn primary" id="b-share">Share this route</button></div>`}
+      <div class="row"><button class="btn primary" id="b-share">Share this route</button></div>
+      <p class="hint">Anyone with the shared link can see this route, including where it starts and ends.</p>`}
       <div id="copybox" hidden><input class="field" id="copyfield" readonly aria-label="Link to copy"></div>
       <details class="opts"><summary>Options</summary>
         ${S.zones.length&&S.pts.length<=2?`<label class="toggle"><input type="checkbox" id="t-strict" ${S.strict?'checked':''}> Follow my whole drawn route exactly (more stops)</label>`:''}
@@ -749,7 +750,7 @@ function render(){
   }
   else if(m==='viewer'){
     const v=S.viewer,parts=splitParts(v.o,v.d,v.s,{o:v.on,d:v.dn});
-    sheet.innerHTML=`<h2>${esc(v.n||'Shared route')}</h2>${v.t?`<p class="note">${esc(String(v.t).slice(0,140))}</p>`:''}<p class="sub">Someone drew this route for you. Open it in your maps app and it will follow the orange line${v.s.length?` using ${v.s.length} in-between stop${v.s.length>1?'s':''}`:''}.</p>
+    sheet.innerHTML=`<h2>${esc(v.n||'Shared route')}</h2>${v.t?`<p class="note">${esc(v.t)}</p>`:''}${v.on||v.dn?`<p class="hint">${v.on?`From <b>${esc(v.on)}</b>`:'From the green pin'} to ${v.dn?`<b>${esc(v.dn)}</b>`:'the red pin'}.</p>`:''}<p class="sub">Someone drew this route for you. Open it in your maps app and it will follow the orange line${v.s.length?` using ${v.s.length} in-between stop${v.s.length>1?'s':''}`:''}.</p>
       ${linkBlocks({origin:v.o,dest:v.d,stops:v.s,avoid:!!v.aa,names:{o:v.on,d:v.dn}})}
       <label class="toggle"><input type="checkbox" id="t-here" ${S.fromHere?'checked':''}> Start from my current location</label>
       <p class="hint">${v.s.length?'The app will announce each in-between stop. Just keep driving; if it pauses, tap Continue or Resume. ':''}Apple Maps links need iOS 18.4 or later.</p>
@@ -762,8 +763,19 @@ function render(){
 }
 
 /* ---------------- Open a shared link ---------------- */
+/* A share link's contents come from whoever made the link, so nothing in it is trusted: every coordinate must be a real
+   one, lists and text have limits, and anything unexpected makes the whole link "damaged". Text is only ever shown escaped. */
+function cleanShare(v){
+  const ll=p=>Array.isArray(p)&&p.length===2&&typeof p[0]==='number'&&typeof p[1]==='number'&&isFinite(p[0])&&isFinite(p[1])&&Math.abs(p[0])<=90&&Math.abs(p[1])<=180;
+  const text=(t,max)=>typeof t==='string'?t.replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,max):'';
+  if(!v||typeof v!=='object'||!ll(v.o)||!ll(v.d))throw 0;
+  const s=v.s===undefined?[]:v.s,z=v.z===undefined?[]:v.z;
+  if(!Array.isArray(s)||s.length>60||!s.every(ll)||!Array.isArray(z)||z.length>60||!z.every(ll))throw 0;
+  if(v.p!==undefined&&(typeof v.p!=='string'||v.p.length>20000))throw 0;
+  return {o:v.o,d:v.d,s,z,p:v.p||'',aa:v.aa?1:0,n:text(v.n,60),t:text(v.t,140),on:text(v.on,200),dn:text(v.dn,200)};
+}
 function openViewer(){
-  try{const v=JSON.parse(b64u.dec(location.hash.slice(3)));if(!v.o||!v.d)throw 0;S.viewer=v;S.mode='viewer';S.fromHere=false;
+  try{const v=cleanShare(JSON.parse(b64u.dec(location.hash.slice(3))));S.viewer=v;S.mode='viewer';S.fromHere=false;
     const path=decPoly(v.p||'');if(path.length>1)L.polyline(path,{color:css('--drawn'),weight:7}).addTo(map);
     let n=0;splitParts(v.o,v.d,v.s,{o:v.on,d:v.dn}).forEach((p,pi,arr)=>{p.w.forEach(w=>L.marker(w,{icon:pinIcon(++n,'fake'),interactive:false}).addTo(map));if(pi<arr.length-1)L.marker(p.d,{icon:pinIcon('⇥','split'),interactive:false}).addTo(map),n++});
     (v.z||[]).forEach(z=>{L.circle(z,{radius:40,color:css('--danger'),weight:2,fillOpacity:.22,interactive:false}).addTo(map);L.marker(z,{icon:pinIcon('✕','avoid'),interactive:false}).addTo(map)});

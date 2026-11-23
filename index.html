@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<!-- Only this site's own scripts may run, and the page may only talk to the map, routing, road-data and search services it uses. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self' https://router.project-osrm.org https://valhalla1.openstreetmap.de https://nominatim.openstreetmap.org https://overpass-api.de https://overpass.private.coffee; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="referrer" content="strict-origin">
 <title>Draw My Route</title>
 <meta name="description" content="Draw your own driving route, then open it in Google Maps or Apple Maps.">
 <meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)">
