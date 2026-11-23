@@ -12,6 +12,7 @@ How it works for the person using it:
 2. Drag the orange line onto the roads you want. On a phone, press and hold the line first, then drag.
    A pin means "take this road", not "stop here": it lands on the road you dragged to, freeways included, and on
    the side of it that the route flows along, so the route never leaves a freeway just to touch a pin.
+   A pin dropped in the middle of an interchange slides along the road until the route no longer doubles back.
    Taps never add pins to a route, and neither does a press that isn't followed by a pull, so a pin cannot be
    added by accident. Typing a destination searches near the start first and lists the nearest matches on top.
    While you drag, the route follows your finger. The page downloads the roads around your trip

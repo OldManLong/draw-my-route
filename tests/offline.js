@@ -785,6 +785,32 @@ module.exports = async function offline(browser, url) {
     await ctx.close();
   });
 
+  await S.test('A pin dropped inside an interchange slides along the road until the route no longer doubles back', async t => {
+    // The stand-in routing server: a pin within 150 m of the "interchange" (the middle of the trip) can only be reached by
+    // overshooting 800 m, turning round and coming back alongside, ten minutes longer. Anywhere else the route is direct.
+    const lonMid = (A[1] + B[1]) / 2, ZONE = 0.0019;
+    const osrm = (route, u) => { const pts = u.split('/driving/')[1].split('?')[0].split(';').map(s => s.split(',').map(Number));
+      const via = pts.length === 3 ? pts[1] : null, inside = via && Math.abs(via[0] - lonMid) < ZONE && Math.abs(via[1] - A[0]) < 0.002;
+      const coords = inside ? [pts[0], via, [via[0] + 0.010, via[1]], [via[0] + 0.010, via[1] + 0.0003], [via[0] - 0.006, via[1] + 0.0003], [via[0] - 0.006, via[1] + 0.0010], pts[2]] : pts;
+      return json(route, { code: 'Ok', routes: [{ distance: inside ? 4000 : 1600, duration: inside ? 700 : 100, geometry: { coordinates: coords }, legs: [{ steps: [{ intersections: [] }] }] }] }); };
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ osrm }) });
+    await drawRoute(page, [A, B]); await page.waitForTimeout(600);
+    const mid = await page.evaluate(([a, b]) => { const p = window.DMR.map.latLngToContainerPoint([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); return [p.x, p.y]; }, [A, B]);
+    // pull the line a little and let go right at the interchange
+    await page.mouse.move(mid[0], mid[1]); await page.mouse.down();
+    await page.mouse.move(mid[0], mid[1] - 24, { steps: 4 }); await page.mouse.move(mid[0], mid[1] - 2, { steps: 4 }); await page.mouse.up();
+    await page.waitForFunction(() => window.DMR.S.pts.length === 3 && window.DMR.S.pts[1].snapped && !window.DMR.S.busy && !!window.DMR.S.grab, null, { timeout: 15000 });
+    const st = await page.evaluate(() => ({ pin: window.DMR.S.pts[1], duration: window.DMR.S.desired.duration, toast: document.getElementById('toast').textContent }));
+    const movedM = Math.abs(st.pin[1] - lonMid) * 81400;
+    t.note(`pin slid ${Math.round(movedM)} m along the road; trip ${Math.round(st.duration)} s (through the interchange pin it was 700 s)`);
+    t.check(Math.abs(st.pin[1] - lonMid) >= ZONE, 'the pin stayed inside the interchange');
+    t.check(movedM < 1500, 'the pin moved much further than it needed to');
+    t.check(st.duration <= 110, 'the route still doubles back');
+    t.check(/moved along the road/.test(st.toast), 'the driver was not told the pin was moved: ' + st.toast);
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
   await S.test('A pin is a pull: on real freeway data, a drop beside the freeway never sends the route off and back', async t => {
     // No browser needed: the road engine on the real Waukesha roads. For each stretch of one-way freeway, drop a pin 40 m
     // to either side of its middle and route from its start, through the pin, to its end.

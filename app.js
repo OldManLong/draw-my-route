@@ -473,7 +473,7 @@ const SNAP_TIERS=[
   {name:'medium',head:18, reach:45, filter:{min_road_class:'tertiary',exclude_ramp:true}},   // collector roads and up
   {name:'any',   head:0,  reach:Infinity, filter:null},
 ];
-const SNAP_FAR=500,SNAP_SIDE=120;                         // metres: how far to look for main roads; how much farther than the nearest still counts as "right there"
+const SNAP_FAR=500,SNAP_SIDE=120,SNAP_FINGER=30;         // metres to look for main roads; metres, and screen pixels, beyond the nearest that still count as "right there"                         // metres: how far to look for main roads; how much farther than the nearest still counts as "right there"
 async function snapToRoad(ll,fine){
   const raw={ll,name:'',tier:'none'};
   if(DEMO)return raw;
@@ -495,8 +495,8 @@ async function snapToRoad(ll,fine){
       best={score,ll:[e.correlated_lat,e.correlated_lon],name:nameOf(e),tier:t.name};
       if(i===0){const seen=new Set();                                     // the other main roads right there, each once
         // one choice per road and direction: three pieces of the same carriageway must not crowd out the other direction
-        best.choices=list.filter(c=>c.distance<=e.distance+SNAP_SIDE).filter(c=>{const key=nameOf(c)+'|'+(typeof c.heading==='number'?Math.round(c.heading/90)%4:c.correlated_lat.toFixed(5)+','+c.correlated_lon.toFixed(5));if(seen.has(key))return false;seen.add(key);return true})
-          .slice(0,4).map(c=>({ll:[c.correlated_lat,c.correlated_lon],name:nameOf(c),d:c.distance}))}});
+        best.choices=list.filter(c=>c.distance<=e.distance+Math.min(SNAP_FAR,Math.max(SNAP_SIDE,SNAP_FINGER*k*mpp))).filter(c=>{const key=nameOf(c)+'|'+(typeof c.heading==='number'?Math.round(c.heading/90)%4:c.correlated_lat.toFixed(5)+','+c.correlated_lon.toFixed(5));if(seen.has(key))return false;seen.add(key);return true})
+          .slice(0,5).map(c=>({ll:[c.correlated_lat,c.correlated_lon],name:nameOf(c),d:c.distance,freeway:!!(c.edge&&c.edge.classification&&c.edge.classification.classification==='motorway')}))}});
     return best||raw;
   }catch(e){return raw}
   finally{clearTimeout(timer)}
@@ -505,32 +505,96 @@ async function snapToRoad(ll,fine){
    same size lie right where the pin was dropped (above all the two directions of a freeway, or a road crossing it), the
    pin goes on the one the route flows through: the one that makes the trip from the pin before to the pin after quickest.
    Landing on the wrong side of a freeway would otherwise send the route off at the next exit and back again. */
-const PULL_TIE=5;                                         // seconds: a choice must be this much quicker to beat a nearer one
+const PULL_TIE=5,PULL_FREEWAY=150;                         // seconds: a choice must be this much quicker to beat a nearer one; and a freeway's head start,
+                                                          // so a pin dropped where a freeway and a street run side by side stays on the freeway
+/* Where a freeway is as near the drop as anything else (within a finger's width of the nearest road), the pin is meant
+   for the freeway: the streets beside it drop out. Zoomed far out, a finger covers the whole interchange and the streets
+   round it, and a street would otherwise win just because the freeway there is mid-turn. Aim clearly at the street
+   (zoom in) and the street is nearer than the freeway by more than a finger, so it stays. */
+const PULL_FINGER=12,PULL_FINGER_MIN=40;                   // screen pixels, and metres at least
+function freewayFirst(s){
+  const ch=s.choices,fw=ch.filter(c=>c.freeway);if(!fw.length||fw.length===ch.length)return ch;
+  const near=Math.min(...ch.map(c=>c.d)),slop=Math.max(PULL_FINGER_MIN,PULL_FINGER*metresPerPx(s.ll[0]));
+  return fw.some(c=>c.d<=near+slop)?fw:ch;
+}
 function pullLocal(prev,next,s){
   if(!s||!s.choices||s.choices.length<2||!prev||!next)return s;
   let best=null;
-  for(const c of s.choices){const r=local.net.route([prev,c.ll,next],{blocked:localBlocked()}),dur=r?r.duration:Infinity;
+  for(const c of freewayFirst(s)){const r=local.net.route([prev,c.ll,next],{blocked:localBlocked()}),dur=(r?r.duration:Infinity)-(c.freeway?PULL_FREEWAY:0);
     if(!best||dur<best.dur-PULL_TIE)best={dur,c}}
   return best&&isFinite(best.dur)?{...s,ll:best.c.ll,name:best.c.name||s.name}:s;
 }
 async function pullChoice(idx,s){
   const prev=S.pts[idx-1],next=S.pts[idx+1];
-  if(!s||!s.choices||s.choices.length<2||!prev||!next)return s;
+  if(!s||!s.choices||!prev||!next)return s;
+  if(s.choices.length<2){const only=freewayFirst(s)[0];return only?{...s,ll:only.ll,name:only.name||s.name}:s}
   if(localCovers([prev,next].concat(s.choices.map(c=>c.ll))))return pullLocal(prev,next,s);
   let best=null;
-  for(const c of s.choices){let dur=Infinity;
-    try{dur=(await route([prev,c.ll,next])).duration}catch(e){/* that choice cannot be judged: leave it out */}
+  for(const c of freewayFirst(s)){let dur=Infinity;
+    try{dur=(await route([prev,c.ll,next])).duration-(c.freeway?PULL_FREEWAY:0)}catch(e){/* that choice cannot be judged: leave it out */}
     if(!best||dur<best.dur-PULL_TIE)best={dur,c}}
   return best&&isFinite(best.dur)?{...s,ll:best.c.ll,name:best.c.name||s.name}:s;
+}
+/* A pin must never make the route double back. In the middle of an interchange every piece of road is mid-turn: to touch a
+   pin there the route overshoots, comes off and loops round. So: route through the pin; if the way out runs back alongside
+   the way in, slide the pin along that route, a little before it and a little after, further each time, until the detour
+   is gone. The pin stays on the roads the route was already using, so the pull is kept; only the doubling back goes. */
+const SPUR_LOOK=6000,SPUR_NEAR=90,SPUR_SKIP=250,SPUR_SAVE=45;   // metres along the route to look; how close counts as alongside; ignored next to the pin; seconds a move must save
+const SPUR_SLIDES=[-500,500,-1200,1200,-2500,2500,-5000,5000],SPUR_QUICK=[-1200,1200];  // metres along the route: before the pin (minus) and after it
+function doublesBack(c,k){
+  // c: route points; k: index of the pin. True if the route within SPUR_LOOK after the pin passes alongside its own way in.
+  const cum=[0];for(let i=1;i<c.length;i++)cum.push(cum[i-1]+hav(c[i-1],c[i]));
+  // A point every 40 m along the way in and the way out (a freeway's own points can be a kilometre apart).
+  const along=(from,to)=>{const out=[];for(let m=from;m<=to;m+=40){const want=cum[k]+m;if(want<0||want>cum[cum.length-1])continue;
+    let i=1;while(i<c.length-1&&cum[i]<want)i++;const t=(want-cum[i-1])/((cum[i]-cum[i-1])||1);out.push([c[i-1][0]+t*(c[i][0]-c[i-1][0]),c[i-1][1]+t*(c[i][1]-c[i-1][1])])}return out};
+  const inPts=along(-SPUR_LOOK,-SPUR_SKIP),outPts=along(SPUR_SKIP,SPUR_LOOK);
+  if(!inPts.length||!outPts.length)return null;
+  const kx=111320*Math.cos(c[k][0]*Math.PI/180),ky=110540,near2=SPUR_NEAR*SPUR_NEAR;
+  for(const o of outPts)for(const p of inPts){const dx=(o[1]-p[1])*kx,dy=(o[0]-p[0])*ky;if(dx*dx+dy*dy<=near2)return cum}
+  return null;
+}
+/* How direct the route is around the pin: straight-line distance between the points `reach` metres before and after it,
+   over the distance driven between them. A route that flows through is near 1 (0.7 round a right-angle turn); one that
+   loops round to touch the pin is much less. */
+function directness(c,cum,k,reach){
+  const at=want=>{if(want<=0)return c[0];if(want>=cum[cum.length-1])return c[c.length-1];let i=1;while(i<c.length-1&&cum[i]<want)i++;
+    const t=(want-cum[i-1])/((cum[i]-cum[i-1])||1);return [c[i-1][0]+t*(c[i][0]-c[i-1][0]),c[i-1][1]+t*(c[i][1]-c[i-1][1])]};
+  const a=Math.max(0,cum[k]-reach),b=Math.min(cum[cum.length-1],cum[k]+reach);
+  return b-a<200?1:hav(at(a),at(b))/(b-a);
+}
+const SPUR_BENT=0.62,SPUR_TURN=0.8,SPUR_KEEP=400,SPUR_BETTER=5;                       // below this directness the pin is suspect; a slid pin's route must still pass this close (m) to the drop
+async function despur(idx,s){
+  const prev=S.pts[idx-1],next=S.pts[idx+1];if(!s||!s.ll||s.tier==='none'||!prev||!next)return s;
+  const through=async ll=>{const pts=[prev,ll,next];try{return localCovers(pts)?local.net.route(pts,{blocked:localBlocked()}):await route(pts)}catch(e){return null}};
+  const r=await through(s.ll);if(!r||!r.coords||r.coords.length<3)return s;
+  const c=r.coords;let k=0,bd=Infinity;for(let i=0;i<c.length;i++){const d=hav(c[i],s.ll);if(d<bd){bd=d;k=i}}
+  const cum=[0];for(let i=1;i<c.length;i++)cum.push(cum[i-1]+hav(c[i-1],c[i]));
+  // Does the route flow through the pin? If it neither doubles back nor loops round, leave the pin alone.
+  // (A pin on a straight run scores about 1 and costs nothing more. Anything that turns near the pin gets checked.)
+  // Even then two nearby slides are tried: a pin just past the right ramp flows on smoothly to the next exit and back.
+  const flows=!doublesBack(c,k)&&directness(c,cum,k,1500)>=SPUR_BENT&&directness(c,cum,k,3000)>=SPUR_TURN;
+  const at=m=>{const want=cum[k]+m;if(want<=0||want>=cum[cum.length-1])return null;let i=1;while(i<c.length-1&&cum[i]<want)i++;
+    const t=(want-cum[i-1])/((cum[i]-cum[i-1])||1);return [c[i-1][0]+t*(c[i][0]-c[i-1][0]),c[i-1][1]+t*(c[i][1]-c[i-1][1])]};
+  // The slid pin's route must still come through the place the pin was dropped (else the pull itself would be lost).
+  const keep=Math.max(SPUR_KEEP,40*metresPerPx(s.ll[0]));
+  const passes=rr=>{setRef(s.ll);const ix=indexLine(resample(rr.coords.map(P),30).pts,Math.max(50,keep));return distToLine(ix,P(s.ll))<=keep};
+  // Every slide is tried and the quickest kept (a smaller slide wins unless a bigger one is clearly quicker): the first
+  // that helps may sit on a street the detour itself used, when the freeway straight through is quicker still.
+  let best=null;
+  for(const m of (flows?SPUR_QUICK:SPUR_SLIDES)){const ll=at(m);if(!ll)continue;
+    const rr=await through(ll);
+    if(rr&&rr.duration<=r.duration-SPUR_SAVE&&passes(rr)&&(!best||rr.duration<best.dur-SPUR_BETTER))best={dur:rr.duration,ll,m}}
+  return best?{...s,ll:best.ll,name:'',slid:best.m}:s;
 }
 /* Snap route pin number idx. Returns false if the pin moved again while we were asking. */
 async function snapVia(idx,fine,announce){
   const before=S.pts[idx];if(!before||before.snapped)return true;
-  if(!before.asking)before.asking=snapToRoad(before,fine).then(s=>pullChoice(idx,s));   // a drop right after a pause shares the one request
+  if(!before.asking)before.asking=snapToRoad(before,fine).then(s=>pullChoice(idx,s)).then(s=>despur(idx,s));   // a drop right after a pause shares the one request
   const s=await before.asking;
   if(S.pts[idx]===before){const ll=[s.ll[0],s.ll[1]];ll.snapped=true;S.pts[idx]=ll}
   else if(!S.pts[idx]||!S.pts[idx].snapped)return false;
-  if(announce&&s.tier!=='any'&&s.tier!=='none'&&s.name)toast('On '+s.name,1600);
+  if(announce&&s.slid)toast('Pin moved along the road so your route flows straight through',2600);
+  else if(announce&&s.tier!=='any'&&s.tier!=='none'&&s.name)toast('On '+s.name,1600);
   return true;
 }
 const finePointer=()=>!matchMedia('(pointer:coarse)').matches;
@@ -588,7 +652,7 @@ function liveEnd(){
   if(!live.on)return;live.on=false;clearTimeout(live.t);if(live.raf){cancelAnimationFrame(live.raf);live.raf=0}
   const idx=live.idx,cur=S.pts[idx];
   if(!live.snapOk){changed();return}
-  if(cur&&live.snap&&liveNear(live.snap.at,live.pt,3))cur.asking=pullChoice(idx,live.snap.res);   // only if the finger really was still
+  if(cur&&live.snap&&liveNear(live.snap.at,live.pt,3))cur.asking=pullChoice(idx,live.snap.res).then(s=>despur(idx,s));   // only if the finger really was still
   drawPoints();snapVia(idx,live.fine,true).then(ok=>{if(ok)changed()});
 }
 
@@ -904,5 +968,5 @@ if(!DEMO&&location.hash.startsWith('#r=')&&openViewer()){}else{render();
 }
 
 /* Handle for the automated tests in tests/ (not used by the app itself). */
-window.DMR={map,S,local,live,lineMatch,placeText,pullChoice,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
+window.DMR={map,S,local,live,lineMatch,placeText,pullChoice,despur,LEVELS,setEnd,fitRoute,snapToRoad,route,valhallaRoute,findStops,splitParts,googleLink,appleLink,encPoly,decPoly,changed,build,shareLink};
 })();

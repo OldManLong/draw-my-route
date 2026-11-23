@@ -196,7 +196,7 @@
         const reach = t.filter ? Math.min(t.reach * k * mpp, 600) : 600, hit = nearest(p, reach, TIER_OK[t.name]); if (!hit) continue;
         const score = hit.d / mpp - t.head * k; if (!best || score < best.score) best = { score, ll: toLL(hit.xy), name: names[E[hit.e].name], tier: t.name, d: hit.d };
       }
-      if (best && best.tier !== 'any') best.choices = nearestEach(p, best.d + SIDE, TIER_OK[best.tier]).slice(0, CHOICES).map(h => ({ ll: toLL(h.xy), name: names[E[h.e].name], d: h.d }));
+      if (best && best.tier !== 'any') best.choices = nearestEach(p, best.d + Math.min(500, Math.max(SIDE, 30 * k * mpp)), TIER_OK[best.tier]).slice(0, CHOICES).map(h => ({ ll: toLL(h.xy), name: names[E[h.e].name], d: h.d, freeway: E[h.e].cls === 0 }));
       return best;
     }
     /* Road stretches within `radius` metres of any of the given points: used to keep previews off roads marked to avoid. */
