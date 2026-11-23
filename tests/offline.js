@@ -51,7 +51,7 @@ const FRAME_PARK = { name: 'Frame Park', category: 'leisure', display_name: 'Fra
 const houseAt = u => { const q = new URL(u).searchParams; return { lat: q.get('lat'), lon: q.get('lon'), category: 'building', name: '', address: { house_number: '101', road: 'West Main Street', city: 'Waukesha', state: 'Wisconsin', postcode: '53186' } }; };
 const bareRoadAt = u => { const q = new URL(u).searchParams; return { lat: q.get('lat'), lon: q.get('lon'), category: 'highway', name: 'County Road F', address: { road: 'County Road F', city: 'Waukesha', state: 'Wisconsin' } }; };
 
-function fakeServices({ osrm, valhalla, locate, roads, reverse } = {}) {
+function fakeServices({ osrm, valhalla, locate, roads, reverse, places } = {}) {
   return route => {
     const u = route.request().url();
     if (u.includes('tile.openstreetmap.org')) return route.fulfill({ body: PNG, contentType: 'image/png' });
@@ -68,7 +68,7 @@ function fakeServices({ osrm, valhalla, locate, roads, reverse } = {}) {
       return valhalla ? valhalla(route, u) : valhallaAnswer(route, valhallaPts(u)); // by default the second engine agrees with the first
     }
     if (u.includes('nominatim') && u.includes('/reverse')) return json(route, reverse ? reverse(u) : { error: 'Unable to geocode' }); // by default: no address known
-    if (u.includes('nominatim')) return json(route, [FRAME_PARK]);
+    if (u.includes('nominatim')) return json(route, places ? places(u) : [FRAME_PARK]);
     return route.abort();
   };
 }
@@ -391,6 +391,67 @@ module.exports = async function offline(browser, url) {
     await p2.waitForFunction(() => window.DMR.S.pts.length === 1, null, { timeout: 8000 });
     t.check(await p2.inputValue('#q-from') === 'My location', 'the start screen button did not set the start');
     await two.close();
+  });
+
+  await S.test('Pins are not added by accident: taps and a press without a pull leave the route alone', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices() });
+    await drawRoute(page, [A, B]); await page.waitForTimeout(600);
+    const mid = await page.evaluate(([a, b]) => { const p = window.DMR.map.latLngToContainerPoint([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); return [Math.round(p.x), Math.round(p.y)]; }, [A, B]);
+    const pins = () => page.evaluate(() => window.DMR.S.pts.length);
+    await page.mouse.click(mid[0], mid[1] - 60); await page.waitForTimeout(500);          // a tap on the map
+    t.check(await pins() === 2, 'a tap on the map added a pin');
+    await page.mouse.click(mid[0], mid[1]); await page.waitForTimeout(500);               // a tap right on the line
+    t.check(await pins() === 2, 'a tap on the line added a pin');
+    await page.mouse.move(mid[0], mid[1]); await page.mouse.down(); await page.mouse.move(mid[0] + 5, mid[1] - 9, { steps: 3 }); await page.mouse.up(); await page.waitForTimeout(700);
+    t.check(await pins() === 2, 'a small nudge of the line (11 px) added a pin');
+    const cdp = await ctx.newCDPSession(page);
+    const touch = (type, x, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }] });
+    await touch('touchStart', mid[0], mid[1]); await page.waitForTimeout(450); await touch('touchEnd'); await page.waitForTimeout(800);
+    t.check(await pins() === 2, 'pressing and holding the line without pulling it added a pin');
+    await touch('touchStart', mid[0], mid[1]); await page.waitForTimeout(450); await touch('touchMove', mid[0] + 3, mid[1] - 5); await touch('touchEnd'); await page.waitForTimeout(800);
+    t.check(await pins() === 2, 'a finger wobble while holding the line added a pin');
+    t.check(await page.evaluate(() => !!window.DMR.S.grab && !window.DMR.S.busy && window.DMR.S.desired.coords.length === 2), 'the route was disturbed');
+    // a real pull still works
+    await page.mouse.move(mid[0], mid[1]); await page.mouse.down(); for (let i = 1; i <= 6; i++) await page.mouse.move(mid[0], mid[1] - 8 * i, { steps: 2 }); await page.mouse.up();
+    await page.waitForFunction(() => window.DMR.S.pts.length === 3 && !window.DMR.S.busy, null, { timeout: 8000 });
+    // taps still place the start and the destination on an empty map
+    await page.click('#b-clear'); await page.waitForTimeout(300);
+    await page.mouse.click(90, 220); await page.waitForTimeout(400); await page.mouse.click(300, 240); await page.waitForTimeout(500);
+    t.check(await pins() === 2, 'taps no longer set the start and destination');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Search looks near the start first: nearest results on top, with how far away they are', async t => {
+    const asked = [];
+    const NEAR = { name: 'Target', category: 'shop', display_name: 'Target, 1250, West Sunset Drive, Waukesha, Wisconsin, 53189, United States', lat: '42.9916', lon: '-88.2577', address: { house_number: '1250', road: 'West Sunset Drive', city: 'Waukesha', state: 'Wisconsin', postcode: '53189' } };
+    const MID = { name: 'Target', category: 'shop', display_name: 'Target, 2401, Kossow Road, Waukesha, Wisconsin, 53186, United States', lat: '43.0440', lon: '-88.1650', address: { house_number: '2401', road: 'Kossow Road', city: 'Waukesha', state: 'Wisconsin', postcode: '53186' } };
+    const FAR = { name: 'Target', category: 'shop', display_name: 'Target, 900, Nicollet Mall, Minneapolis, Minnesota, 55403, United States', lat: '44.9740', lon: '-93.2750', address: { house_number: '900', road: 'Nicollet Mall', city: 'Minneapolis', state: 'Minnesota', postcode: '55403' } };
+    let nearbyEmpty = false;
+    const places = u => { const q = new URL(u).searchParams; asked.push({ viewbox: q.get('viewbox'), bounded: q.get('bounded') }); return q.get('bounded') ? (nearbyEmpty ? [] : [MID, NEAR]) : [FAR, MID, NEAR]; };
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ places }) });
+    // nothing set, map zoomed right out: a plain search anywhere
+    await page.fill('#q-from', 'target'); await page.waitForSelector('#results button:not([disabled])');
+    t.check(asked.length === 1 && !asked[0].viewbox && !asked[0].bounded, 'with nothing set the search should not be tied to a place: ' + JSON.stringify(asked[0]));
+    // set the start (the library, in Waukesha), then type a destination
+    await page.evaluate(() => window.DMR.setEnd('from', [43.0086, -88.2329], 'Waukesha Public Library', 'Waukesha Public Library, Waukesha, Wisconsin'));
+    asked.length = 0;
+    await page.fill('#q-to', 'target'); await page.waitForFunction(() => document.querySelectorAll('#results button').length === 2);
+    const box = asked[0].viewbox.split(',').map(Number);
+    t.note('search area: ' + asked[0].viewbox);
+    t.check(asked[0].bounded === '1' && box[0] < -88.2329 && box[2] > -88.2329 && box[3] < 43.0086 && box[1] > 43.0086 && box[1] - box[3] < 2.5, 'the search area is not a box round the start');
+    const shown = await page.$$eval('#results button', bs => bs.map(b => b.textContent));
+    t.note('shown: ' + shown.join(' | '));
+    t.check(/Sunset/.test(shown[0]) && /Kossow/.test(shown[1]), 'results are not nearest first');
+    t.check(/mi away/.test(shown[0]), 'results do not say how far away they are');
+    // nothing nearby: fall back to anywhere, still nearest first
+    nearbyEmpty = true; asked.length = 0;
+    await page.fill('#q-to', 'target store'); await page.waitForFunction(() => document.querySelectorAll('#results button').length === 3);
+    t.check(asked.length === 2 && asked[0].bounded === '1' && !asked[1].bounded && !!asked[1].viewbox, 'did not fall back to a wider search when nothing was nearby');
+    const wide = await page.$$eval('#results button', bs => bs.map(b => b.textContent));
+    t.check(/Sunset/.test(wide[0]) && /Minneapolis/.test(wide[2]), 'the wider results are not nearest first');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
   });
 
   await S.test('Dragging the line with a mouse adds a pin where you let go and re-routes through it', async t => {

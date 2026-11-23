@@ -10,6 +10,8 @@ How it works for the person using it:
 1. Set where you are starting and where you are going. The fastest route appears.
    The site only asks for your location if you tap the location button; it never asks just because the page opened.
 2. Drag the orange line onto the roads you want. On a phone, press and hold the line first, then drag.
+   Taps never add pins to a route, and neither does a press that isn't followed by a pull, so a pin cannot be
+   added by accident. Typing a destination searches near the start first and lists the nearest matches on top.
    While you drag, the route follows your finger. The page downloads the roads around your trip
    (`roads.js`, from OpenStreetMap's Overpass service) and works out each redraw on the phone itself,
    so there is no wait and no routing server is asked while you shape the route, including when you mark

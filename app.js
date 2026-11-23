@@ -564,6 +564,7 @@ function liveEnd(){
 /* Mouse: press the line and pull. Touch: press and hold the line for a moment (so panning the map still works), then pull.
    The spot you grabbed becomes a pin the route must pass through; pins can be dragged again or removed. */
 let drag=null;
+const PULL_MIN=14;                                        // pixels the line must be pulled before a pin is added
 function nearestVertex(ll){const c=S.desired.coords,k=Math.cos(ll[0]*Math.PI/180);let b=0,bd=Infinity;
   for(let i=0;i<c.length;i++){const d=(c[i][0]-ll[0])**2+((c[i][1]-ll[1])*k)**2;if(d<bd){bd=d;b=i}}return b}
 function startLineDrag(e){
@@ -589,27 +590,29 @@ function moveLineDrag(e){
   }
   e.preventDefault();
   const p=map.containerPointToLatLng(map.mouseEventToContainerPoint(e));
+  drag.far=Math.max(drag.far||0,Math.hypot(e.clientX-drag.x,e.clientY-drag.y));
   if(S.markers[drag.idx])S.markers[drag.idx].setLatLng(p);
   liveMove([p.lat,p.lng],e.clientX,e.clientY);
 }
 function endLineDrag(e){
   if(!drag||(e&&e.pointerId!==drag.id))return;
-  clearTimeout(drag.hold);const was=drag.on;drag=null;
+  clearTimeout(drag.hold);const was=drag.on,idx=drag.idx,pulled=(drag.far||0)>=PULL_MIN;drag=null;
   document.removeEventListener('pointermove',moveLineDrag);document.removeEventListener('pointerup',endLineDrag);document.removeEventListener('pointercancel',endLineDrag);
   map.dragging.enable();
-  if(was){S.noClickUntil=Date.now()+450;liveEnd()}
+  if(was){S.noClickUntil=Date.now()+450;
+    if(pulled)liveEnd();
+    else{live.on=false;if(live.raf){cancelAnimationFrame(live.raf);live.raf=0}S.pts.splice(idx,1);changed()}}   // held but never pulled: no pin
 }
 map.on('click',e=>{
   if(S.mode!=='draw'||Date.now()<(S.noClickUntil||0))return;$('results').hidden=true;
   const p=[e.latlng.lat,e.latlng.lng];
   if(S.tool==='avoid'){S.zones.push(p);drawZones();changed();return}
-  let idx=S.pts.length;
-  if(S.pts.length>=2&&!$('t-end')?.checked){let best=hav(S.pts[S.pts.length-1],p);
-    for(let i=0;i<S.pts.length-1;i++){const add=hav(S.pts[i],p)+hav(p,S.pts[i+1])-hav(S.pts[i],S.pts[i+1]);if(add<best){best=add;idx=i+1}}}
-  S.pts.splice(idx,0,p);
-  if(S.pts.length===1){S.fromLabel='';S.fromQ='';changed();describeEnd('from');return}
-  if(S.pts.length===2&&idx===1){S.toLabel='';S.toQ='';changed();describeEnd('to');return}
-  if(S.pts.length>2&&idx>0&&idx<S.pts.length-1){drawPoints();snapVia(idx,finePointer(),true).then(ok=>{if(ok)changed()})}else changed();
+  // A tap only ever sets the start, then the destination. Once there is a route, taps do nothing: the route is changed by
+  // dragging its line, which takes a deliberate press, so a stray touch while panning or zooming cannot add a pin.
+  if(S.pts.length>=2)return;
+  S.pts.push(p);
+  if(S.pts.length===1){S.fromLabel='';S.fromQ='';changed();describeEnd('from')}
+  else{S.toLabel='';S.toQ='';changed();describeEnd('to')}
 });
 
 /* ---------------- Build links ---------------- */
@@ -676,12 +679,30 @@ function showHits(hits){const el=$('results');el.innerHTML='';
   hits.slice(0,8).forEach(h=>{const b=document.createElement('button');b.innerHTML=`${esc(h.name)}<small>${esc(h.sub||'')}</small>`;
     b.onclick=()=>{el.hidden=true;$('q-from').blur();$('q-to').blur();setEnd(qWhich,h.ll,h.name,h.q||'')};el.appendChild(b)});
   el.hidden=false}
+/* Where a search should look first: near the other end of the trip if that is set (typing a destination looks near the
+   start, and the other way round); else near what the map shows, if it is zoomed in to somewhere; else anywhere. */
+function searchNear(){
+  const other=qWhich==='to'?S.pts[0]:(S.pts.length>1?S.pts[S.pts.length-1]:S.toWait&&S.toWait.ll);
+  if(other)return [other[0],other[1]];
+  if(map.getZoom()>=9){const c=map.getCenter();return [c.lat,c.lng]}
+  return null;
+}
+const SEARCH_REACH=0.9;                                   // degrees of latitude either side of that point: about 100 km
 async function search(q){
   if(!q)return;
   if(DEMO){const v=q.toLowerCase();showHits(DEMO.places.filter(p=>(p.name+' '+(p.sub||'')).toLowerCase().includes(v)));return}
-  const v=map.getBounds();                                             // favour places in the part of the map being looked at
-  try{const r=await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&q=${encodeURIComponent(q)}&viewbox=${v.getWest().toFixed(4)},${v.getNorth().toFixed(4)},${v.getEast().toFixed(4)},${v.getSouth().toFixed(4)}`);
-    const j=await r.json();showHits(j.map(p=>{const parts=p.display_name.split(', '),t=placeText(p);return {name:t.label||parts[0],sub:parts.slice(1,4).join(', '),ll:[+p.lat,+p.lon],q:t.q}}))}
+  const near=searchNear(),base=`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&q=${encodeURIComponent(q)}`;
+  try{
+    let j=[];
+    if(near){const dLon=SEARCH_REACH/Math.cos(near[0]*Math.PI/180);
+      const box=`&viewbox=${(near[1]-dLon).toFixed(4)},${(near[0]+SEARCH_REACH).toFixed(4)},${(near[1]+dLon).toFixed(4)},${(near[0]-SEARCH_REACH).toFixed(4)}`;
+      j=await (await fetch(base+box+'&bounded=1')).json();              // only places in that area...
+      if(!Array.isArray(j)||!j.length)j=await (await fetch(base+box)).json()}   // ...and if there are none, anywhere, nearer ones favoured
+    else j=await (await fetch(base)).json();
+    const hits=(Array.isArray(j)?j:[]).map(p=>{const parts=p.display_name.split(', '),t=placeText(p),ll=[+p.lat,+p.lon],d=near?hav(near,ll):null;
+      return {name:t.label||parts[0],sub:(d===null?'':fmtDist(d)+' away · ')+parts.slice(1,4).join(', '),ll,q:t.q,d}});
+    if(near)hits.sort((a,b)=>a.d-b.d);                                   // nearest first
+    showHits(hits)}
   catch(e){toast('Search is unavailable right now.')}
 }
 
