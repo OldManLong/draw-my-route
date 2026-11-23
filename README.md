@@ -7,7 +7,8 @@ who want to keep off a particular highway or junction, and for telling someone e
 
 How it works for the person using it:
 
-1. Set where you are starting (your location by default) and where you are going. The fastest route appears.
+1. Set where you are starting and where you are going. The fastest route appears.
+   The site only asks for your location if you tap the location button; it never asks just because the page opened.
 2. Drag the orange line onto the roads you want. On a phone, press and hold the line first, then drag.
    While you drag, the route follows your finger. The page downloads the roads around your trip
    (`roads.js`, from OpenStreetMap's Overpass service) and works out each redraw on the phone itself,
@@ -76,8 +77,9 @@ Map data © OpenStreetMap contributors. Leaflet is included under its BSD 2-Clau
 ## Privacy and security
 
 - The site has no accounts, no server of its own and no analytics. Nothing a visitor does is stored by the site.
+- The visitor's location is requested only when they tap the location button, never on opening the page.
 - To work, the page sends the points of a trip to the free OpenStreetMap services listed above (routing, road data,
-  search and address lookup), and the visitor's location, if they allow it, once to the address lookup.
+  search and address lookup), and the visitor's location, if they chose to use it, once to the address lookup.
 - A shared link contains the route itself, including where it starts and ends, so anyone given the link can see it.
 - Whatever a shared link carries is checked before use and only ever shown as plain text.
 - A content security policy in `index.html` lets the page run only its own scripts and talk only to the services it uses.

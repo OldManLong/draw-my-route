@@ -295,7 +295,7 @@ const b64u={enc:s=>btoa(unescape(encodeURIComponent(s))).replace(/\+/g,'-').repl
 
 /* ---------------- Map ---------------- */
 const BOUNDS = DEMO ? L.latLngBounds([42.975,-88.285],[43.045,-88.185]) : null;
-const map=L.map('map',{zoomControl:false,attributionControl:true,minZoom:DEMO?11:3}).setView([43.0117,-88.2315],14);
+const map=L.map('map',{zoomControl:false,attributionControl:true,minZoom:DEMO?11:3}).setView(DEMO?[43.0117,-88.2315]:[39.5,-98.35],DEMO?14:4);   // a neutral wide view: nothing is known about the visitor
 if(DEMO){
   const T=DEMO.tiles,cache={};
   const getImg=k=>cache[k]||(cache[k]=new Promise(res=>{const im=new Image();im.onload=()=>res(im);im.onerror=()=>res(null);im.src=T[k]}));
@@ -309,7 +309,7 @@ if(DEMO){
   new DemoLayer({maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
 }else{
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
-  if(navigator.geolocation&&!location.hash.startsWith('#r='))navigator.geolocation.getCurrentPosition(p=>{if(!S.pts.length&&S.mode==='draw')setEnd('from',[p.coords.latitude,p.coords.longitude],'My location')},()=>{},{timeout:6000});
+  // The visitor's location is never requested when the page opens: only when they tap the location button (useMyLocation).
 }
 
 /* ---------------- State ---------------- */
@@ -674,8 +674,8 @@ function showHits(hits){const el=$('results');el.innerHTML='';
 async function search(q){
   if(!q)return;
   if(DEMO){const v=q.toLowerCase();showHits(DEMO.places.filter(p=>(p.name+' '+(p.sub||'')).toLowerCase().includes(v)));return}
-  const c=map.getCenter();
-  try{const r=await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&q=${encodeURIComponent(q)}&viewbox=${c.lng-0.5},${c.lat+0.4},${c.lng+0.5},${c.lat-0.4}`);
+  const v=map.getBounds();                                             // favour places in the part of the map being looked at
+  try{const r=await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&q=${encodeURIComponent(q)}&viewbox=${v.getWest().toFixed(4)},${v.getNorth().toFixed(4)},${v.getEast().toFixed(4)},${v.getSouth().toFixed(4)}`);
     const j=await r.json();showHits(j.map(p=>{const parts=p.display_name.split(', '),t=placeText(p);return {name:t.label||parts[0],sub:parts.slice(1,4).join(', '),ll:[+p.lat,+p.lon],q:t.q}}))}
   catch(e){toast('Search is unavailable right now.')}
 }
@@ -696,14 +696,16 @@ function render(){
     if(!av)S.tool='route';
     sheet.innerHTML=`<h2>${av?'Tap a road to avoid':n<2?'Where are you going?':'Shape your route'}</h2>
       <p class="sub">${av?'Tap a road you would rather not drive on and the route moves off it. Tap a ✕ to undo.'
-        :n===0?'Set where you are starting from in the box above, or tap the map.':n===1?'Now set where you are going, in the box above or by tapping the map.'
+        :n===0?'Type where you are starting from in the box above, tap the map, or use your location.':n===1?'Now set where you are going, in the box above or by tapping the map.'
         :`${touch?'Press and hold the orange line, then drag it':'Drag the orange line'} onto the roads you want. Tap a pin to remove it.`}</p>
       ${local.status==='loading'&&n>1&&!av?'<p class="hint" id="roads">Loading nearby roads so the line can follow your finger…</p>':''}
       <p class="hint" id="tripline">${S.busy?'Fitting your route to the roads…':R?`<b>${fmtTime(R.duration)}</b> · ${fmtDist(R.distance)}${nz?` · ${nz} road${nz===1?'':'s'} avoided`:''}`:''}</p>
+      ${n===0&&!DEMO?'<div class="row"><button class="btn" id="b-here">◎ Start from my location</button></div><p class="hint">Your location is only requested when you tap that button.</p>':''}
       <div class="row"><button class="btn primary" id="b-build" ${R&&!S.busy&&S.snap?'':'disabled'}>Send to Google or Apple Maps</button></div>
       <div class="row tools"><button class="btn small ${av?'primary':''}" id="b-avoid" ${n>1?'':'disabled'}>${av?'Done marking':'✕ Avoid a road'+(nz?` (${nz})`:'')}</button><button class="btn small" id="b-rev" ${n>1?'':'disabled'}>⇅ Reverse</button><button class="btn small" id="b-clear" ${n||S.toWait?'':'disabled'}>Clear</button></div>
       ${DEMO?'<p class="hint">Demo map: Waukesha, WI and I-94. The hosted version works anywhere.</p>':''}`;
     $('b-build').onclick=build;
+    if($('b-here'))$('b-here').onclick=useMyLocation;
     $('b-avoid').onclick=()=>{S.tool=av?'route':'avoid';render()};
     $('b-rev').onclick=()=>{S.pts.reverse();[S.fromLabel,S.toLabel]=[S.toLabel,S.fromLabel];[S.fromQ,S.toQ]=[S.toQ,S.fromQ];changed()};
     $('b-clear').onclick=()=>{S.pts=[];S.zones=[];S.fromLabel=S.toLabel=S.fromQ=S.toQ='';S.toWait=null;S.tool='route';drawZones();changed()};

@@ -350,16 +350,36 @@ module.exports = async function offline(browser, url) {
     await ctx.close();
   });
 
-  await S.test('Starts from your current location when the browser allows it', async t => {
+  await S.test('Location is never requested when the page opens, only when the visitor taps the button', async t => {
+    // Location permission already granted, the case where a browser would hand it over without a prompt.
     const ctx = await browser.newContext({ ...require('playwright').devices['iPhone 13'], geolocation: { latitude: 43.0117, longitude: -88.2315 }, permissions: ['geolocation'] });
+    await ctx.addInitScript(() => { window.__asked = 0; const g = navigator.geolocation, get = g.getCurrentPosition.bind(g), watch = g.watchPosition.bind(g); g.getCurrentPosition = (...a) => { window.__asked++; return get(...a); }; g.watchPosition = (...a) => { window.__asked++; return watch(...a); }; });
     const page = await ctx.newPage(); await page.route(u => u.origin !== new URL(url).origin, fakeServices({ reverse: houseAt }));
-    await page.goto(url);
-    await page.waitForFunction(() => window.DMR && window.DMR.S.pts.length === 1 && window.DMR.S.fromQ !== '', null, { timeout: 8000 });
+    await page.goto(url); await page.waitForFunction(() => window.DMR && document.querySelector('#sheet h2'));
+    await page.waitForTimeout(2500);
+    const idle = await page.evaluate(() => ({ asked: window.__asked, pts: window.DMR.S.pts.length, from: document.getElementById('q-from').value, zoom: window.DMR.map.getZoom() }));
+    t.check(idle.asked === 0, `the page asked for the location ${idle.asked} time(s) just by opening`);
+    t.check(idle.pts === 0 && idle.from === '', 'a starting point was set without the visitor doing anything');
+    t.check(idle.zoom <= 5, 'the map opened zoomed in on a particular place');
+    t.check((await page.textContent('#sheet')).includes('only requested when you tap'), 'the start screen does not say when location is used');
+    // typing and searching must not ask either
+    await page.fill('#q-to', 'frame park'); await page.waitForSelector('#results button:not([disabled])'); await page.click('#results button');
+    await page.waitForTimeout(500);
+    t.check(await page.evaluate(() => window.__asked) === 0, 'searching for a place asked for the location');
+    // the button does
+    await page.click('#b-loc');
+    await page.waitForFunction(() => window.DMR.S.pts.length === 2 && window.DMR.S.fromQ !== '', null, { timeout: 8000 });
+    t.check(await page.evaluate(() => window.__asked) === 1, 'tapping the button did not ask exactly once');
     t.check(await page.inputValue('#q-from') === 'My location', 'From box does not say My location');
     t.check(await page.evaluate(() => window.DMR.S.fromQ) === '101 West Main Street, Waukesha, Wisconsin 53186', 'the address of my location was not looked up for the links');
-    await page.fill('#q-to', 'frame park'); await page.waitForSelector('#results button:not([disabled])'); await page.click('#results button');
-    await page.waitForFunction(() => window.DMR.S.pts.length === 2 && window.DMR.S.desired);
     await ctx.close();
+    // the start screen's own button too
+    const two = await browser.newContext({ ...require('playwright').devices['iPhone 13'], geolocation: { latitude: 43.0117, longitude: -88.2315 }, permissions: ['geolocation'] });
+    const p2 = await two.newPage(); await p2.route(u => u.origin !== new URL(url).origin, fakeServices({ reverse: houseAt }));
+    await p2.goto(url); await p2.waitForSelector('#b-here'); await p2.click('#b-here');
+    await p2.waitForFunction(() => window.DMR.S.pts.length === 1, null, { timeout: 8000 });
+    t.check(await p2.inputValue('#q-from') === 'My location', 'the start screen button did not set the start');
+    await two.close();
   });
 
   await S.test('Dragging the line with a mouse adds a pin where you let go and re-routes through it', async t => {
