@@ -96,6 +96,7 @@ function loopsIn(c){
     if(Math.abs(T[j]-T[i])>=LOOP_TURN&&D[j]-D[i]>=LOOP_SHORT){out.push(c[(i+j)>>1]);i=j;break}}}
   return out;
 }
+const WEAVE_MIN=100,WEAVE_MAX=400,WEAVE_SAME=1200,WEAVE_FAST=20;   // metres, metres, metres; metres a second: only on fast roads
 async function osrmRoute(pts){
   const wait=lastCall+350-Date.now();if(wait>0)await sleep(wait);lastCall=Date.now();
   const s=pts.map(p=>p[1].toFixed(6)+','+p[0].toFixed(6)).join(';');
@@ -105,9 +106,20 @@ async function osrmRoute(pts){
   // exits: how many times the route comes off the freeway and later gets back on. Each time it gets on from an ordinary
   // road the directions say "on ramp" (going from one freeway to another they say "merge" or "fork"), so: on-ramps, less the first.
   let hwy=false,ramps=0;
+  /* weaves: cloverleaf interchanges the route drives straight through. On a cloverleaf, traffic coming on from one loop
+     merges just before traffic going off to the next loop leaves, and the two cross in a short shared lane. Seen from the
+     route: on a fast road, a road joining and then, WEAVE_MIN to WEAVE_MAX metres on, a road leaving. Weaves within
+     WEAVE_SAME metres are the same interchange. Each is given as the point between the two. */
+  const weaves=[];let run=0,lastM=null,lastW=-1e9,prevI=null;
   rt.legs.forEach(l=>l.steps.forEach(st=>{const ty=st.maneuver&&st.maneuver.type;if(ty==='on ramp')ramps++;
+    const fast=st.duration>0&&st.distance/st.duration>=WEAVE_FAST;
+    (st.intersections||[]).forEach(i=>{const ll=[i.location[1],i.location[0]];if(prevI)run+=hav(prevI,ll);prevI=ll;
+      const b=i.bearings||[],e=i.entry||[];if(!fast||b.length!==3||i.in===undefined||i.out===undefined){if(!fast)lastM=null;return}
+      const k=[0,1,2].find(x=>x!==i.in&&x!==i.out);if(k===undefined)return;
+      if(!e[k])lastM={run,ll};                                       // a road joins
+      else{if(lastM&&run-lastM.run>=WEAVE_MIN&&run-lastM.run<=WEAVE_MAX&&run-lastW>WEAVE_SAME){weaves.push([(ll[0]+lastM.ll[0])/2,(ll[1]+lastM.ll[1])/2]);lastW=run}lastM=null}});
     (st.intersections||[]).forEach(i=>{if((i.bearings||[]).length>=3)addInter([i.location[1],i.location[0]]);if((i.classes||[]).includes('motorway'))hwy=true})}));
-  const out={coords:rt.geometry.coordinates.map(c=>[c[1],c[0]]),distance:rt.distance,duration:rt.duration,hwy,exits:Math.max(0,ramps-1)};const at=loopsIn(out.coords);out.loops=at.length;out.loopAt=at;return out;
+  const out={coords:rt.geometry.coordinates.map(c=>[c[1],c[0]]),distance:rt.distance,duration:rt.duration,hwy,exits:Math.max(0,ramps-1)};const at=loopsIn(out.coords);out.loops=at.length;out.loopAt=at;out.weaves=weaves.length;out.weaveAt=weaves;return out;
 }
 
 /* Hosted, avoid-highways predictions: public Valhalla router (OSRM's public server can't avoid highways). */
@@ -427,7 +439,7 @@ async function routeFor(pts,warn){
     try{const v=await valhallaRoute(pts,false,S.zones);const at=loopsIn(v.coords);v.loops=at.length;v.loopAt=at;return warn?aroundLoops(pts,v):v}
     catch(e){if(warn)toast("Couldn't route around your ✕ marks just now. Drag the line off those roads instead.",4500);return route(pts)}}
   const r=await route(pts);
-  return warn&&!DEMO?aroundLoops(pts,r):r;                   // only for the finished line, not while a finger is still dragging
+  return warn&&!DEMO?aroundWeaves(pts,await aroundLoops(pts,r)):r;                   // only for the finished line, not while a finger is still dragging
 }
 /* Cloverleaf loop ramps are worth going out of the way to miss: get on or off the freeway from another direction, or at
    the next interchange. The route's loops are marked as places to keep off and the other engine is asked again; its
@@ -438,6 +450,31 @@ async function aroundLoops(pts,r){
   try{const v=await valhallaRoute(pts,false,S.zones.concat(r.loopAt));const at=loopsIn(v.coords);v.loops=at.length;v.loopAt=at;
     if(v.loops<r.loops&&(v.exits||0)<=(r.exits||0)&&v.duration<=r.duration+LOOP_DETOUR*(r.loops-v.loops)){v.dodged=r.loops-v.loops;return v}}
   catch(e){/* the other engine could not answer: keep the route as it is */}
+  return r;
+}
+/* Cloverleaf interchanges driven straight through are worth a longer way round too: going round a city on the side of
+   its ring road that has fewer of them. The weaves are marked as places to keep off and the other engine asked for a way;
+   the place where its way lies farthest from the route becomes a hidden pull, and the usual engine routes through it. That
+   route is taken if it has fewer cloverleafs, leaves the freeway no more often, uses no more loop ramps, and costs no more
+   than WEAVE_DETOUR seconds for each cloverleaf missed (WEAVE_MOST seconds at most). */
+const WEAVE_DETOUR=300,WEAVE_MOST=1800,WEAVE_ASK=12,WEAVE_APART=1500;
+async function aroundWeaves(pts,r){
+  if(!r||!r.weaves||r.dodged||localCovers(pts))return r;
+  try{
+    const v=await valhallaRoute(pts,false,S.zones.concat(r.weaveAt.slice(0,WEAVE_ASK)));
+    setRef(r.coords[0]);const ix=indexLine(resample(r.coords.map(P),200).pts,2000);
+    // the longest stretch of its way that lies well away from the route; the pull goes in the middle of it
+    let far=null,from=-1,longest=0;const vc=v.coords;
+    for(let i=0;i<=vc.length;i++){const off=i<vc.length&&distToLine(ix,P(vc[i]))>WEAVE_APART;
+      if(off){if(from<0)from=i}else if(from>=0){if(i-from>longest){longest=i-from;far=vc[(from+i)>>1]}from=-1}}
+    if(!far)return r;                                                  // its way is the same way: nothing to choose
+    // which leg of the route the pull belongs in: the one whose ends it lies between
+    let leg=1,best=Infinity;for(let i=1;i<pts.length;i++){const d=hav(pts[i-1],far)+hav(far,pts[i])-hav(pts[i-1],pts[i]);if(d<best){best=d;leg=i}}
+    const s=await snapToRoad(far,false),via=(s&&s.ll)||far;
+    const r2=await aroundLoops([...pts.slice(0,leg),via,...pts.slice(leg)],await route([...pts.slice(0,leg),via,...pts.slice(leg)]));
+    const saved=r.weaves-(r2.weaves||0);
+    if(saved>0&&(r2.exits||0)<=(r.exits||0)&&(r2.loops||0)<=(r.loops||0)&&r2.duration<=r.duration+Math.min(WEAVE_MOST,WEAVE_DETOUR*saved)){r2.around=saved;r2.quicker=r.duration;return r2}
+  }catch(e){/* could not be judged: keep the route as it is */}
   return r;
 }
 function clearLine(){if(S.line){map.removeLayer(S.line);S.line=null}if(S.grab){map.removeLayer(S.grab);S.grab=null}}
@@ -666,7 +703,7 @@ async function liveRoute(){
   try{const r=await routeFor(pts,false);
     if(live.on&&live.idx===idx&&(!previewing||liveNear(at,live.pt,3))){S.desired=r;   // with local previews running, only a still finger gets the server's line
       if(S.line)S.line.setLatLngs(r.coords);else S.line=L.polyline(r.coords,{color:css('--drawn'),weight:7,opacity:.95,interactive:false}).addTo(map);
-      const el=$('tripline');if(el)el.innerHTML=`<b>${fmtTime(r.duration)}</b> · ${fmtDist(r.distance)}${r.loops?` · ${r.loops} loop ramp${r.loops===1?'':'s'}`:''}${r.dodged?` · goes round ${r.dodged} loop ramp${r.dodged===1?'':'s'}`:''}`}}
+      const el=$('tripline');if(el)el.innerHTML=`<b>${fmtTime(r.duration)}</b> · ${fmtDist(r.distance)}${r.loops?` · ${r.loops} loop ramp${r.loops===1?'':'s'}`:''}${r.dodged?` · goes round ${r.dodged} loop ramp${r.dodged===1?'':'s'}`:''}${r.weaves?` · ${r.weaves} weaving merge${r.weaves===1?'':'s'}`:''}${r.around?` · misses ${r.around} weaving merge${r.around===1?'':'s'}`:''}`}}
   catch(e){/* keep the last good line; the next move tries again */}
   live.busy=false;if(live.on&&live.dirty)liveRoute();
 }
@@ -903,7 +940,7 @@ function render(){
         :n===0?'Type where you are starting from in the box above, tap the map, or use your location.':n===1?'Now set where you are going, in the box above or by tapping the map.'
         :`${touch?'Press and hold the orange line, then drag it':'Drag the orange line'} onto the roads you want. Tap a pin to remove it.`}</p>
       ${local.status==='loading'&&n>1&&!av?'<p class="hint" id="roads">Loading nearby roads so the line can follow your finger…</p>':''}
-      <p class="hint" id="tripline">${S.busy?'Fitting your route to the roads…':R?`<b>${fmtTime(R.duration)}</b> · ${fmtDist(R.distance)}${R.loops?` · ${R.loops} loop ramp${R.loops===1?'':'s'}`:''}${R.dodged?` · goes round ${R.dodged} loop ramp${R.dodged===1?'':'s'}`:''}${nz?` · ${nz} road${nz===1?'':'s'} avoided`:''}`:''}</p>
+      <p class="hint" id="tripline">${S.busy?'Fitting your route to the roads…':R?`<b>${fmtTime(R.duration)}</b> · ${fmtDist(R.distance)}${R.loops?` · ${R.loops} loop ramp${R.loops===1?'':'s'}`:''}${R.dodged?` · goes round ${R.dodged} loop ramp${R.dodged===1?'':'s'}`:''}${R.weaves?` · ${R.weaves} weaving merge${R.weaves===1?'':'s'}`:''}${R.around?` · misses ${R.around} weaving merge${R.around===1?'':'s'}`:''}${nz?` · ${nz} road${nz===1?'':'s'} avoided`:''}`:''}</p>
       ${n===0&&!DEMO?'<div class="row"><button class="btn" id="b-here">◎ Start from my location</button></div><p class="hint">Your location is only requested if you tap that button.</p>':''}
       <div class="row"><button class="btn primary" id="b-build" ${R&&!S.busy&&S.snap?'':'disabled'}>Send to Google or Apple Maps</button></div>
       <div class="row tools"><button class="btn small ${av?'primary':''}" id="b-avoid" ${n>1?'':'disabled'}>${av?'Done marking':'✕ Avoid a road'+(nz?` (${nz})`:'')}</button><button class="btn small" id="b-rev" ${n>1?'':'disabled'}>⇅ Reverse</button><button class="btn small" id="b-clear" ${n||S.toWait?'':'disabled'}>Clear</button></div>
