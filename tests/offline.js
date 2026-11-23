@@ -361,13 +361,26 @@ module.exports = async function offline(browser, url) {
     t.check(idle.asked === 0, `the page asked for the location ${idle.asked} time(s) just by opening`);
     t.check(idle.pts === 0 && idle.from === '', 'a starting point was set without the visitor doing anything');
     t.check(idle.zoom <= 5, 'the map opened zoomed in on a particular place');
-    t.check((await page.textContent('#sheet')).includes('only requested when you tap'), 'the start screen does not say when location is used');
+    t.check((await page.textContent('#sheet')).includes('only requested if you tap'), 'the start screen does not say when location is used');
     // typing and searching must not ask either
     await page.fill('#q-to', 'frame park'); await page.waitForSelector('#results button:not([disabled])'); await page.click('#results button');
     await page.waitForTimeout(500);
     t.check(await page.evaluate(() => window.__asked) === 0, 'searching for a place asked for the location');
-    // the button does
+    // the button first shows the site's own clear question, and still has not asked
     await page.click('#b-loc');
+    await page.waitForSelector('#ask:not([hidden])');
+    const words = await page.textContent('#askbox');
+    t.check(/Use your current location\?/.test(words) && /where you are right now/.test(words) && /does not store/.test(words), 'the question does not say plainly what is asked and what happens to it');
+    await page.waitForTimeout(600);
+    t.check(await page.evaluate(() => window.__asked) === 0, 'the location was requested before the visitor answered');
+    // "Not now" closes it and nothing is asked
+    await page.click('#ask-no');
+    t.check(await page.isHidden('#ask') && await page.evaluate(() => window.__asked) === 0 && await page.evaluate(() => window.DMR.S.pts.length) === 0, '"Not now" did not simply close the question');
+    // Escape too
+    await page.click('#b-loc'); await page.waitForSelector('#ask:not([hidden])'); await page.keyboard.press('Escape');
+    t.check(await page.isHidden('#ask') && await page.evaluate(() => window.__asked) === 0, 'Escape did not close the question');
+    // "Use my location" asks, once
+    await page.click('#b-loc'); await page.click('#ask-yes');
     await page.waitForFunction(() => window.DMR.S.pts.length === 2 && window.DMR.S.fromQ !== '', null, { timeout: 8000 });
     t.check(await page.evaluate(() => window.__asked) === 1, 'tapping the button did not ask exactly once');
     t.check(await page.inputValue('#q-from') === 'My location', 'From box does not say My location');
@@ -377,6 +390,7 @@ module.exports = async function offline(browser, url) {
     const two = await browser.newContext({ ...require('playwright').devices['iPhone 13'], geolocation: { latitude: 43.0117, longitude: -88.2315 }, permissions: ['geolocation'] });
     const p2 = await two.newPage(); await p2.route(u => u.origin !== new URL(url).origin, fakeServices({ reverse: houseAt }));
     await p2.goto(url); await p2.waitForSelector('#b-here'); await p2.click('#b-here');
+    await p2.waitForSelector('#ask:not([hidden])'); await p2.screenshot({ path: path.join(OUT, 'offline-location-question.png') }); await p2.click('#ask-yes');
     await p2.waitForFunction(() => window.DMR.S.pts.length === 1, null, { timeout: 8000 });
     t.check(await p2.inputValue('#q-from') === 'My location', 'the start screen button did not set the start');
     await two.close();
