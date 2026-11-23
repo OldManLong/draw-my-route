@@ -366,41 +366,18 @@ module.exports = async function offline(browser, url) {
     await page.fill('#q-to', 'frame park'); await page.waitForSelector('#results button:not([disabled])'); await page.click('#results button');
     await page.waitForTimeout(500);
     t.check(await page.evaluate(() => window.__asked) === 0, 'searching for a place asked for the location');
-    // the button first shows the site's own clear question, and still has not asked
+    // tapping the button asks the browser, once, with no question of the site's own in between
     await page.click('#b-loc');
-    await page.waitForSelector('#ask:not([hidden])');
-    const words = await page.textContent('#askbox');
-    t.check(/Use your current location\?/.test(words) && /start of your route/.test(words) && words.length < 120, 'the question is not short and plain: ' + words);
-    await page.waitForTimeout(600);
-    t.check(await page.evaluate(() => window.__asked) === 0, 'the location was requested before the visitor answered');
-    // "Not now" closes it and nothing is asked
-    await page.click('#ask-no');
-    t.check(await page.isHidden('#ask') && await page.evaluate(() => window.__asked) === 0 && await page.evaluate(() => window.DMR.S.pts.length) === 0, '"Not now" did not simply close the question');
-    // Escape too
-    await page.click('#b-loc'); await page.waitForSelector('#ask:not([hidden])'); await page.keyboard.press('Escape');
-    t.check(await page.isHidden('#ask') && await page.evaluate(() => window.__asked) === 0, 'Escape did not close the question');
-    // "Use my location" asks, once
-    await page.click('#b-loc'); await page.click('#ask-yes');
+    t.check(await page.locator('#ask').count() === 0, 'the site still shows its own location question');
     await page.waitForFunction(() => window.DMR.S.pts.length === 2 && window.DMR.S.fromQ !== '', null, { timeout: 8000 });
     t.check(await page.evaluate(() => window.__asked) === 1, 'tapping the button did not ask exactly once');
     t.check(await page.inputValue('#q-from') === 'My location', 'From box does not say My location');
     t.check(await page.evaluate(() => window.DMR.S.fromQ) === '101 West Main Street, Waukesha, Wisconsin 53186', 'the address of my location was not looked up for the links');
     await ctx.close();
-    // Where the browser has not been told yes or no, its own prompt does the asking: the site shows no question of its own.
-    const fresh = await browser.newContext({ ...require('playwright').devices['iPhone 13'] });
-    await fresh.addInitScript(() => { window.__asked = 0; const g = navigator.geolocation, get = g.getCurrentPosition.bind(g); g.getCurrentPosition = (...a) => { window.__asked++; return get(...a); }; });
-    const p3 = await fresh.newPage(); await p3.route(u => u.origin !== new URL(url).origin, fakeServices());
-    await p3.goto(url); await p3.waitForSelector('#b-loc');
-    const state = await p3.evaluate(async () => (await navigator.permissions.query({ name: 'geolocation' })).state);
-    await p3.click('#b-loc'); await p3.waitForFunction(() => window.__asked === 1, null, { timeout: 5000 });
-    t.note('browser permission state in a fresh visit: ' + state);
-    t.check(state === 'prompt' && await p3.isHidden('#ask'), 'the site showed its own question although the browser was going to ask');
-    await fresh.close();
     // the start screen's own button too
     const two = await browser.newContext({ ...require('playwright').devices['iPhone 13'], geolocation: { latitude: 43.0117, longitude: -88.2315 }, permissions: ['geolocation'] });
     const p2 = await two.newPage(); await p2.route(u => u.origin !== new URL(url).origin, fakeServices({ reverse: houseAt }));
     await p2.goto(url); await p2.waitForSelector('#b-here'); await p2.click('#b-here');
-    await p2.waitForSelector('#ask:not([hidden])'); await p2.screenshot({ path: path.join(OUT, 'offline-location-question.png') }); await p2.click('#ask-yes');
     await p2.waitForFunction(() => window.DMR.S.pts.length === 1, null, { timeout: 8000 });
     t.check(await p2.inputValue('#q-from') === 'My location', 'the start screen button did not set the start');
     await two.close();

@@ -376,22 +376,11 @@ function setEnd(which,ll,label,q=''){
   changed();
   if(!q)describeEnd(which);                                            // my location or a bare spot: find its address
 }
-/* The location button. If the browser is going to show its own permission prompt, that prompt does the asking. If the
-   browser would hand the location over silently (permission already granted, or it cannot say), the site asks first. */
-async function useMyLocation(){
+/* The location button: the only place the visitor's location is ever requested. The browser shows its own permission
+   prompt; the site adds no question of its own. */
+function useMyLocation(){
   if(!navigator.geolocation){toast('This browser cannot share your location.');return}
-  let state='unknown';
-  try{state=(await navigator.permissions.query({name:'geolocation'})).state}catch(e){/* older browsers: ask ourselves */}
-  if(state==='prompt'){locateNow();return}
-  if(state==='denied'){toast('Location is switched off for this site in your browser settings. Type a starting place or tap the map.',5000);return}
-  const box=$('ask'),back=document.activeElement;
-  const close=()=>{box.hidden=true;document.removeEventListener('keydown',onKey);if(back&&back.focus)back.focus()};
-  const onKey=e=>{if(e.key==='Escape')close()};
-  $('ask-no').onclick=close;
-  box.onclick=e=>{if(e.target===box)close()};
-  $('ask-yes').onclick=()=>{close();locateNow()};
-  document.addEventListener('keydown',onKey);
-  box.hidden=false;$('ask-yes').focus();
+  locateNow();
 }
 function locateNow(){
   toast('Finding your location…');
