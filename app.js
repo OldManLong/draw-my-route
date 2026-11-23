@@ -120,14 +120,16 @@ async function valhallaRoute(pts,avoid=true,exclude=null){
     let coords=[],distance=0,duration=0;
     for(let i=0;i<pts.length-1;i+=VALHALLA_MAX-1){const r=await valhallaRoute(pts.slice(i,i+VALHALLA_MAX),avoid,exclude);
       coords=coords.length?coords.concat(r.coords.slice(1)):r.coords;distance+=r.distance;duration+=r.duration}
-    return {coords,distance,duration};
+    return {coords,distance,duration,exits:0};
   }
   const wait=lastV+1100-Date.now();if(wait>0)await sleep(wait);lastV=Date.now();
   const q={locations:pts.map(p=>({lat:+p[0].toFixed(6),lon:+p[1].toFixed(6),type:'break'})),costing:'auto',...(avoid?{costing_options:{auto:{use_highways:0}}}:{}),...(exclude&&exclude.length?{exclude_locations:exclude.map(z=>({lat:+z[0].toFixed(6),lon:+z[1].toFixed(6)}))}:{}),directions_options:{units:'kilometers'}};
   const j=await getJSON('https://valhalla1.openstreetmap.de/route?json='+encodeURIComponent(JSON.stringify(q)));
   if(!j.trip)throw new Error(j.error||'No route found');
   let coords=[];j.trip.legs.forEach(l=>{const c=dec6(l.shape);coords=coords.length?coords.concat(c.slice(1)):c});
-  return {coords,distance:j.trip.summary.length*1000,duration:j.trip.summary.time};
+  // exits, as for the other engine: times it gets on a freeway from an ordinary road (manoeuvre types 17 to 19), less the first
+  let ramps=0;j.trip.legs.forEach(l=>(l.maneuvers||[]).forEach(m=>{if(m.type>=17&&m.type<=19)ramps++}));
+  return {coords,distance:j.trip.summary.length*1000,duration:j.trip.summary.time,exits:Math.max(0,ramps-1)};
 }
 
 /* Demo: the same idea, computed locally on Waukesha's OpenStreetMap road graph. */
@@ -429,12 +431,12 @@ async function routeFor(pts,warn){
 }
 /* Cloverleaf loop ramps are worth going out of the way to miss: get on or off the freeway from another direction, or at
    the next interchange. The route's loops are marked as places to keep off and the other engine is asked again; its
-   answer is taken if it has fewer loops and costs no more than LOOP_DETOUR seconds for each loop it misses. */
+   answer is taken if it has fewer loops, does not come off the freeway and get back on any more often, and costs no more than LOOP_DETOUR seconds for each loop it misses. */
 const LOOP_DETOUR=300,LOOP_MOST=8;
 async function aroundLoops(pts,r){
   if(!r||!r.loops||r.loops>LOOP_MOST)return r;
   try{const v=await valhallaRoute(pts,false,S.zones.concat(r.loopAt));const at=loopsIn(v.coords);v.loops=at.length;v.loopAt=at;
-    if(v.loops<r.loops&&v.duration<=r.duration+LOOP_DETOUR*(r.loops-v.loops)){v.dodged=r.loops-v.loops;return v}}
+    if(v.loops<r.loops&&(v.exits||0)<=(r.exits||0)&&v.duration<=r.duration+LOOP_DETOUR*(r.loops-v.loops)){v.dodged=r.loops-v.loops;return v}}
   catch(e){/* the other engine could not answer: keep the route as it is */}
   return r;
 }
