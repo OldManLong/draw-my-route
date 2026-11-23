@@ -6,9 +6,9 @@ const DEMO = window.DMR_DEMO || null;          // embedded Waukesha map + road g
 /* How hard to pin the route down. More stops = more reliable, but more "arriving at stop" announcements.
    second: also check the stops against a second routing engine. maxGap: longest stretch (metres) allowed without a stop. */
 const LEVELS = {
-  few:      {label:'Fewest stops',  second:false, maxGap:0,        note:'Only where the fastest route would leave yours. Best when the driver knows the way.'},
-  balanced: {label:'Balanced',      second:true,  maxGap:2000,  note:'Checked against two routing engines, with a stop at least every 2 km (1.2 mi).'},
-  most:     {label:'Most reliable', second:true,  maxGap:700,  note:'Checked against two routing engines, with a stop at least every 700 m (0.4 mi). Expect frequent announcements.'},
+  few:      {label:'Lightest',      second:false, maxGap:0,        note:'Lightest: a pass-through point only where the fastest route would leave yours. Fewest announcements.'},
+  balanced: {label:'Balanced',      second:true,  maxGap:2000,  note:'Balanced: checked against two routing engines, with a pass-through point at least every 2 km (1.2 mi).'},
+  most:     {label:'Firmest',       second:true,  maxGap:700,  note:'Firmest: checked against two routing engines, with a pass-through point at least every 700 m (0.4 mi). Expect frequent announcements.'},
 };
 const PART_MAX = 9;                                // Google Maps URLs allow up to 9 waypoints
 const TOL = 22;                                    // meters: how close a route must be to count as "the same road"
@@ -308,7 +308,7 @@ if(DEMO){
     return cv}});
   new DemoLayer({maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
 }else{
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors'}).addTo(map);
   // The visitor's location is never requested when the page opens: only when they tap the location button (useMyLocation).
 }
 
@@ -635,14 +635,15 @@ async function build(){
     const res=await findStops(line.coords,base,prog('Google and Apple: '));
     const pick=res;
     pick.same=line===S.desired?1:lineMatch(S.desired.coords,line.coords);   // how much of the shaped line the sent line shares
-    pick.names={o:S.fromQ,d:S.toQ};pick.level=S.level;S.result=pick;S.mode='result';showResult();render();fitRoute(line.coords);return;
+    pick.names={o:S.fromQ,d:S.toQ};pick.level=S.level;S.result=pick;S.mode='result';showResult();render();sheet.scrollTop=0;fitRoute(line.coords);return;
   }catch(e){toast(e.message||'Something went wrong. Try again.');S.mode='draw';drawPoints()}
   render();
 }
 /* Share of line a that runs along line b (within TOL metres). */
 function lineMatch(aLL,bLL){setRef(aLL[0]);const A=resample(aLL.map(P),15),ix=indexLine(resample(bLL.map(P),15).pts);
   let on=0;for(const p of A.pts)if(distToLine(ix,p)<=TOL)on++;return A.pts.length?on/A.pts.length:1}
-function fitRoute(coords){if(!coords||coords.length<2)return;const h=sheet.offsetHeight;map.fitBounds(L.latLngBounds(coords),{paddingTopLeft:[28,130],paddingBottomRight:[28,h+20],maxZoom:17})}
+function fitRoute(coords){if(!coords||coords.length<2)return;const h=sheet.offsetHeight,top=$('top').hidden?28:$('ends').getBoundingClientRect().bottom+22;
+  map.fitBounds(L.latLngBounds(coords),{paddingTopLeft:[28,top],paddingBottomRight:[28,h+20],maxZoom:17})}
 function clearResult(){S.resLayers.forEach(l=>map.removeLayer(l));S.resLayers=[]}
 function showResult(){
   clearResult();const r=S.result;if(!r)return;
@@ -650,7 +651,7 @@ function showResult(){
   if(S.line&&S.sent)S.line.setLatLngs(S.sent.coords);                 // show the line that is being sent
   S.resLayers.push(L.polyline(r.cand.coords,{color:css('--accent'),weight:3,dashArray:'6 7',opacity:.9}).addTo(map));
   const parts=splitParts(r.origin,r.dest,r.stops,r.names);let n=0;
-  parts.forEach((p,pi)=>{p.w.forEach(w=>{n++;S.resLayers.push(L.marker(w,{icon:pinIcon(n,'fake'),interactive:false}).addTo(map))});
+  parts.forEach((p,pi)=>{p.w.forEach(w=>{n++;S.resLayers.push(L.marker(w,{icon:pinIcon('','fake'),interactive:false}).addTo(map))});
     if(pi<parts.length-1){n++;S.resLayers.push(L.marker(p.d,{icon:pinIcon('⇥','split'),interactive:false}).addTo(map))}});
   S.resLayers.push(L.marker(r.origin,{icon:pinIcon('A','start'),interactive:false}).addTo(map));
   S.resLayers.push(L.marker(r.dest,{icon:pinIcon('B','end'),interactive:false}).addTo(map));
@@ -692,40 +693,77 @@ function searchNear(){
    find nothing. Degrees of latitude either side: about 17 km, then about 100 km. */
 const SEARCH_REACH=[0.15,0.9],SEARCH_ENOUGH=4;
 let searchSeq=0;
+/* Photon (OpenStreetMap data): made for search as you type, forgiving of misspellings ("Culvers", "Wallgreens"), and it
+   favours places near a point. Its answer in the shape placeText() reads. */
+async function photonSearch(q,near){
+  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),6000);
+  try{
+    const r=await fetch(`https://photon.komoot.io/api/?limit=8&lang=en&q=${encodeURIComponent(q)}`+(near?`&lat=${near[0].toFixed(5)}&lon=${near[1].toFixed(5)}&zoom=11&location_bias_scale=0.2`:''),{signal:ctl.signal});
+    if(!r.ok)throw new Error('search answered '+r.status);
+    const j=await r.json();
+    return (j.features||[]).filter(f=>f&&f.geometry&&Array.isArray(f.geometry.coordinates)).map(f=>{const p=f.properties||{},c=f.geometry.coordinates;
+      const town=p.city||p.locality||p.district||p.county||'',street=p.street?((p.housenumber?p.housenumber+' ':'')+p.street):'';
+      return {name:p.name||'',category:p.osm_key||'',lat:c[1],lon:c[0],address:{house_number:p.housenumber,road:p.street,city:town,state:p.state,postcode:p.postcode},
+        display_name:[p.name||street,p.name?street:'',town,p.state].filter(Boolean).join(', ')}});
+  }finally{clearTimeout(timer)}
+}
 async function search(q){
   if(!q)return;
   if(DEMO){const v=q.toLowerCase();showHits(DEMO.places.filter(p=>(p.name+' '+(p.sub||'')).toLowerCase().includes(v)));return}
-  const seq=++searchSeq,near=searchNear(),base=`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&q=${encodeURIComponent(q)}`;
-  const ask=async url=>{const j=await (await fetch(url)).json();return Array.isArray(j)?j:[]};
+  const seq=++searchSeq,near=searchNear();
+  let found=null;
+  try{found=await photonSearch(q,near)}catch(e){found=null}
+  if(seq!==searchSeq)return;                                            // the visitor has typed on: drop this search
   try{
-    let found=[];const seen=new Set(),add=list=>{for(const p of list){const k=p.place_id||p.lat+','+p.lon;if(!seen.has(k)){seen.add(k);found.push(p)}}};
-    if(near){
-      let box='';
-      for(const reach of SEARCH_REACH){const dLon=reach/Math.cos(near[0]*Math.PI/180);
-        box=`&viewbox=${(near[1]-dLon).toFixed(4)},${(near[0]+reach).toFixed(4)},${(near[1]+dLon).toFixed(4)},${(near[0]-reach).toFixed(4)}`;
-        add(await ask(base+box+'&bounded=1'));
-        if(seq!==searchSeq)return;                                       // the visitor has typed on: drop this search
-        if(found.length>=SEARCH_ENOUGH)break}
-      if(!found.length){add(await ask(base+box));if(seq!==searchSeq)return}
-    }else{add(await ask(base));if(seq!==searchSeq)return}
-    const hits=found.map(p=>{const parts=p.display_name.split(', '),t=placeText(p),ll=[+p.lat,+p.lon],d=near?hav(near,ll):null;
-      return {name:t.label||parts[0],sub:(d===null?'':fmtDist(d)+' away · ')+parts.slice(1,4).join(', '),ll,q:t.q,d}});
-    if(near)hits.sort((a,b)=>a.d-b.d);                                   // nearest first
+    if(!found||!found.length){found=await nominatimSearch(q,near,seq);if(found===null)return}
+    // Order: places whose name is what was typed come first, nearest of them on top; then the looser matches in the order
+    // the search service ranked them. (Nearest-first alone put a "…Airport Road" clinic above the airport itself.)
+    const plain=x=>String(x||'').toLowerCase().replace(/[^a-z0-9]/g,''),want=plain(q);
+    const hits=found.map((p,i)=>{const parts=p.display_name.split(', '),t=placeText(p),ll=[+p.lat,+p.lon],d=near?hav(near,ll):null,nm=plain(p.name);
+      return {name:t.label||parts[0],sub:(d===null?'':fmtDist(d)+' away · ')+parts.slice(1,4).join(', '),ll,q:t.q,d,i,
+        exact:want.length>=3&&nm.length>=3&&(nm===want||nm.startsWith(want)||want.startsWith(nm))}});
+    hits.sort((a,b)=>a.exact!==b.exact?(a.exact?-1:1):a.exact&&near?a.d-b.d:a.i-b.i);
     showHits(hits)}
   catch(e){if(seq===searchSeq)toast('Search is unavailable right now.')}
 }
+/* The fallback: Nominatim, which matches whole words as typed. Returns null if the visitor typed on meanwhile. */
+async function nominatimSearch(q,near,seq){
+  const base=`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&q=${encodeURIComponent(q)}`;
+  const ask=async url=>{const j=await (await fetch(url)).json();return Array.isArray(j)?j:[]};
+  const found=[],seen=new Set(),add=list=>{for(const p of list){const k=p.place_id||p.lat+','+p.lon;if(!seen.has(k)){seen.add(k);found.push(p)}}};
+  if(near){
+    let box='';
+    for(const reach of SEARCH_REACH){const dLon=reach/Math.cos(near[0]*Math.PI/180);
+      box=`&viewbox=${(near[1]-dLon).toFixed(4)},${(near[0]+reach).toFixed(4)},${(near[1]+dLon).toFixed(4)},${(near[0]-reach).toFixed(4)}`;
+      add(await ask(base+box+'&bounded=1'));
+      if(seq!==searchSeq)return null;
+      if(found.length>=SEARCH_ENOUGH)break}
+    if(!found.length){add(await ask(base+box));if(seq!==searchSeq)return null}
+  }else{add(await ask(base));if(seq!==searchSeq)return null}
+  if(near)found.sort((x,y)=>hav(near,[+x.lat,+x.lon])-hav(near,[+y.lat,+y.lon]));   // exact-word matches: nearest first
+  return found;
+}
+
+/* Who makes this possible. OpenStreetMap's licence requires its credit (also on the map itself, on every screen);
+   the others are free services run by volunteers and companies, credited here by name. */
+const CREDITS=`<details class="opts" id="credits"><summary>About and credits</summary>
+  <p class="hint">Map, roads, places and addresses: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors, under the Open Database Licence.</p>
+  <p class="hint">Map pictures from <a href="https://www.openstreetmap.org/" target="_blank" rel="noopener">OpenStreetMap</a>. Routing by <a href="https://project-osrm.org/" target="_blank" rel="noopener">OSRM</a> and <a href="https://valhalla.github.io/valhalla/" target="_blank" rel="noopener">Valhalla</a> (servers run by <a href="https://www.fossgis.de/" target="_blank" rel="noopener">FOSSGIS</a>). Place search by <a href="https://photon.komoot.io/" target="_blank" rel="noopener">Photon</a> (komoot) and <a href="https://nominatim.org/" target="_blank" rel="noopener">Nominatim</a>. Road data through the <a href="https://overpass-api.de/" target="_blank" rel="noopener">Overpass API</a>. Map display by <a href="https://leafletjs.com/" target="_blank" rel="noopener">Leaflet</a>.</p>
+  <p class="hint">Draw My Route is not connected with Google or Apple. It only builds links that open in their maps apps.</p>
+</details>`;
 
 /* ---------------- Sheet ---------------- */
 function linkBlocks(r){
   const g=splitParts(r.origin,r.dest,r.stops,r.names),here=i=>S.fromHere&&i===0,av=!!r.avoid;
-  const ptitle=(i,n,p)=>n>1?`<div class="ptitle">Part ${i+1} of ${n} · ${p.w.length} stop${p.w.length===1?'':'s'}</div>`:'';
-  return g.map((p,i)=>`<div class="part">${ptitle(i,g.length,p)}<div class="row"><a class="btn google" href="${esc(googleLink(p,here(i),av))}" target="_blank" rel="noopener">Open in Google Maps</a><a class="btn apple" href="${esc(appleLink(p,here(i),av))}" target="_blank" rel="noopener">Open in Apple Maps</a></div>
+  const ptitle=(i,n,p)=>n>1?`<div class="ptitle">Part ${i+1} of ${n} · ${p.w.length} stop${p.w.length===1?'':'s'} · open in</div>`:'<div class="ptitle">Open in</div>';
+  return g.map((p,i)=>`<div class="part">${ptitle(i,g.length,p)}<div class="row"><a class="btn google" href="${esc(googleLink(p,here(i),av))}" target="_blank" rel="noopener">Google Maps</a><a class="btn apple" href="${esc(appleLink(p,here(i),av))}" target="_blank" rel="noopener">Apple Maps</a></div>
     <div class="row"><button class="btn small" data-copy="g${i}">Copy Google link</button><button class="btn small" data-copy="a${i}">Copy Apple link</button></div></div>`).join('')
-    +(av?`<p class="hint">Both links turn on <b>Avoid highways</b> for this trip, which ${r.stops.length?'saves stops':'means no stops at all'}.</p>`:'');
+    +(av?`<p class="hint">Both links turn on <b>Avoid highways</b> for this trip.</p>`:'');
 }
 function editRoute(){clearResult();S.result=null;S.mode='draw';if(S.line&&S.desired)S.line.setLatLngs(S.desired.coords);drawPoints();drawZones();render()}
 function render(){
-  const m=S.mode;$('top').hidden=m==='viewer';
+  const m=S.mode;$('top').hidden=m==='viewer'||m==='result'||m==='working';   // the From/To boxes belong to drawing: off the map otherwise
+  sheet.classList.toggle('compact',m==='result'||m==='viewer');           // a shorter sheet, so the route stays in view above it
   if(m==='draw'){
     const R=S.desired,n=S.pts.length,nz=S.zones.length,av=S.tool==='avoid'&&n>=2,touch=matchMedia('(pointer:coarse)').matches;
     if(!av)S.tool='route';
@@ -738,7 +776,8 @@ function render(){
       ${n===0&&!DEMO?'<div class="row"><button class="btn" id="b-here">◎ Start from my location</button></div><p class="hint">Your location is only requested if you tap that button.</p>':''}
       <div class="row"><button class="btn primary" id="b-build" ${R&&!S.busy&&S.snap?'':'disabled'}>Send to Google or Apple Maps</button></div>
       <div class="row tools"><button class="btn small ${av?'primary':''}" id="b-avoid" ${n>1?'':'disabled'}>${av?'Done marking':'✕ Avoid a road'+(nz?` (${nz})`:'')}</button><button class="btn small" id="b-rev" ${n>1?'':'disabled'}>⇅ Reverse</button><button class="btn small" id="b-clear" ${n||S.toWait?'':'disabled'}>Clear</button></div>
-      ${DEMO?'<p class="hint">Demo map: Waukesha, WI and I-94. The hosted version works anywhere.</p>':''}`;
+      ${DEMO?'<p class="hint">Demo map: Waukesha, WI and I-94. The hosted version works anywhere.</p>':''}
+      ${n<2&&!DEMO?CREDITS:''}`;
     $('b-build').onclick=build;
     if($('b-here'))$('b-here').onclick=useMyLocation;
     $('b-avoid').onclick=()=>{S.tool=av?'route':'avoid';render()};
@@ -751,29 +790,35 @@ function render(){
   else if(m==='result'){
     const r=S.result,parts=splitParts(r.origin,r.dest,r.stops,r.names),pct=Math.floor(r.match*100),ns=r.stops.length,sn=`${ns} stop${ns===1?'':'s'}`;
     const good=r.avoidOnly?r.crossed===0:r.match>=0.97,nzs=r.zones===1?'road you marked':`${r.zones} roads you marked`;
-    sheet.innerHTML=`<h2>${r.avoidOnly?(ns?`${sn} keep${ns===1?'s':''} them off the ${nzs}`:`No stops needed`):(ns?`${sn} keep${ns===1?'s':''} them on your route`:'No stops needed')}</h2>
-      <p class="sub">${r.avoidOnly?(ns?'Everywhere else, Google and Apple are free to pick their own roads.':'The fastest route already stays off those roads, so the links just go from A to B.')
-        :(ns?'Google Maps and Apple Maps will route through these points in order, which keeps them on your path.':'The fastest route already follows your path, so the links just go from A to B.')}</p>
-      ${r.avoidOnly?`<div class="match ${good?'good':'warn'}">${good?`<b>✓</b> Predicted to stay off ${r.zones===1?'the':'all'} ${nzs}`:`<b>${r.crossed}</b> marked spot${r.crossed===1?' is':'s are'} still on the predicted route. Draw your route around ${r.crossed===1?'it':'them'}.`}</div>`
-        :`<div class="match ${good?'good':'warn'}"><b>${pct}%</b> predicted match with your route${good?'':'. Try moving one of your points onto a main road, or add a point where the dashed line strays.'}</div>`}
-      ${r.names&&(r.names.o||r.names.d)?`<p class="hint">${r.names.o?`From <b>${esc(r.names.o)}</b>`:'From your pin'} to ${r.names.d?`<b>${esc(r.names.d)}</b>`:'your pin'}.</p>`:''}
-      ${r.same<0.9?'<p class="hint">Between your pins, the maps apps are expected to use some different side streets from the line you shaped. The orange line shows what is being sent. Go back and add a pin on any road that matters to you.</p>':''}
-      <div class="legend"><span><i></i>Your route</span><span><i class="pred"></i>Predicted drive in Google/Apple</span>${r.zones?'<span><i class="x"></i>Road to avoid</span>':''}</div>
-      <div class="seg" role="tablist" aria-label="How many stops">${Object.keys(LEVELS).map(k=>`<button role="tab" data-level="${k}" aria-selected="${S.level===k}" class="${S.level===k?'on':''}">${LEVELS[k].label}</button>`).join('')}</div>
-      <p class="hint">${(LEVELS[S.level]||LEVELS.few).note}${r.checked==='failed'?' The second routing engine was unavailable just now, so this was checked with one engine only.':''}</p>
-      ${r.blocked?`<p class="hint">${r.blocked} ✕ ${r.blocked===1?'is':'are'} on your own route, so ${r.blocked===1?'it was':'they were'} ignored.</p>`:''}
-      ${parts.length>1?`<p class="hint" style="margin:0 0 8px">Your route needs more than ${PART_MAX} stops, so it's split into ${parts.length} parts. Open part 2 when you reach the end of part 1 (⇥).</p>`:''}
+    // The stops are plumbing: they are how Google and Apple are kept on the route, not something the driver cares about.
+    // So the screen says the route is ready and offers the two apps; how it works is folded away under "Details".
+    const stopsWords=r.avoidOnly?(ns?`${sn} keep${ns===1?'s':''} the maps apps off the ${nzs}; everywhere else they are free to pick their own roads.`:'The fastest route already stays off those roads, so the links simply go from start to destination.')
+      :(ns?`${sn} keep${ns===1?'s':''} Google Maps and Apple Maps on your route: they are asked to pass through ${ns===1?'that point':'those points'} in order.`:'The fastest route already follows your route, so the links simply go from start to destination.');
+    sheet.innerHTML=`<h2>Your route is ready</h2>
+      ${parts.length>1?`<p class="hint">A long route: it comes in ${parts.length} parts. Open the next part when you reach the end of the one before (⇥ on the map).</p>`:''}
       ${linkBlocks(r)}
+      <div class="row"><button class="btn small" id="b-edit">← Edit route</button><button class="btn small" id="b-new">New route</button></div>
+      ${good?'':(r.avoidOnly?`<div class="match warn"><b>${r.crossed}</b> road${r.crossed===1?'':'s'} you marked ${r.crossed===1?'is':'are'} still on the expected drive. Go back and drag your route around ${r.crossed===1?'it':'them'}.</div>`
+        :`<div class="match warn">The maps apps may not follow all of this route (about <b>${pct}%</b> expected). Go back and drag the line where the dashed line strays, or choose a firmer setting under Details.</div>`)}
+      ${r.same<0.9?'<p class="hint">Between your pins, the maps apps are expected to use some different side streets from the line you shaped. The orange line shows what is being sent. Go back and add a pin on any road that matters to you.</p>':''}
+      ${ns?`<p class="hint">On the way, the maps app will announce ${ns===1?'a pass-through point':ns+' pass-through points'} that keep${ns===1?'s':''} it on your route. Just keep driving; if it pauses, tap Continue or Resume.</p>`:''}
       ${DEMO?'':`<input class="field" id="f-note" maxlength="140" placeholder="Add a note for whoever gets this (optional)" aria-label="Note to include when sharing" value="${esc(S.note)}">
       <div class="row"><button class="btn primary" id="b-share">Share this route</button></div>
       <p class="hint">Anyone with the shared link can see this route, including where it starts and ends.</p>`}
       <div id="copybox" hidden><input class="field" id="copyfield" readonly aria-label="Link to copy"></div>
-      <details class="opts"><summary>Options</summary>
-        ${S.zones.length&&S.pts.length<=2?`<label class="toggle"><input type="checkbox" id="t-strict" ${S.strict?'checked':''}> Follow my whole drawn route exactly (more stops)</label>`:''}
-        <label class="toggle"><input type="checkbox" id="t-here" ${S.fromHere?'checked':''}> Start from the driver's current location (your start becomes the first stop)</label>
-      </details>
-      <p class="hint">${ns?`Google and Apple treat each in-between point as a stop and will announce it. Stops are sent as map coordinates (numbers such as ${r.stops[0][0].toFixed(4)}, ${r.stops[0][1].toFixed(4)}), never as place names, so they are easy to tell from the real destination. Just keep driving; if the app pauses, tap Continue or Resume. `:''}Apple Maps links need iOS 18.4 or later. Phone browsers without the Google Maps app only show the first 3 stops.</p>
-      <div class="row" style="margin-top:8px"><button class="btn small" id="b-edit">Edit route</button><button class="btn small" id="b-new">New route</button></div>`;
+      <details class="opts" id="more" ${S.moreOpen?'open':''}><summary>Details and options</summary>
+        ${r.names&&(r.names.o||r.names.d)?`<p class="hint">${r.names.o?`From <b>${esc(r.names.o)}</b>`:'From your pin'} to ${r.names.d?`<b>${esc(r.names.d)}</b>`:'your pin'}.</p>`:''}
+        <p class="hint">${stopsWords}${good&&!r.avoidOnly?` Expected match with your route: ${pct}%.`:''}${good&&r.avoidOnly&&r.zones?` Expected to stay off ${r.zones===1?'the':'all'} ${nzs}.`:''}</p>
+        <div class="legend"><span><i></i>Your route</span><span><i class="pred"></i>Expected drive in Google/Apple</span>${ns?'<span><i class="dot"></i>Pass-through point</span>':''}${r.zones?'<span><i class="x"></i>Road to avoid</span>':''}</div>
+        <p class="ptitle" style="margin:10px 0 4px">How firmly to hold the route</p>
+        <div class="seg" role="tablist" aria-label="How firmly to hold the route">${Object.keys(LEVELS).map(k=>`<button role="tab" data-level="${k}" aria-selected="${S.level===k}" class="${S.level===k?'on':''}">${LEVELS[k].label}</button>`).join('')}</div>
+        <p class="hint">${(LEVELS[S.level]||LEVELS.few).note}${r.checked==='failed'?' The second routing engine was unavailable just now, so this was checked with one engine only.':''}</p>
+        ${r.blocked?`<p class="hint">${r.blocked} ✕ ${r.blocked===1?'is':'are'} on your own route, so ${r.blocked===1?'it was':'they were'} ignored.</p>`:''}
+        ${S.zones.length&&S.pts.length<=2?`<label class="toggle"><input type="checkbox" id="t-strict" ${S.strict?'checked':''}> Follow my whole drawn route exactly (more pass-through points)</label>`:''}
+        <label class="toggle"><input type="checkbox" id="t-here" ${S.fromHere?'checked':''}> Start from the driver's current location (your start becomes the first pass-through point)</label>
+        <p class="hint">${ns?`Pass-through points are sent as map coordinates (numbers such as ${r.stops[0][0].toFixed(4)}, ${r.stops[0][1].toFixed(4)}), never as place names, so they are easy to tell from the real destination. `:''}Apple Maps links need iOS 18.4 or later. Phone browsers without the Google Maps app only show the first 3 points.</p>
+      </details>`;
+    $('more').ontoggle=e=>{S.moreOpen=e.target.open;const r2=sheet.getBoundingClientRect();document.documentElement.style.setProperty('--sheet-h',r2.height+'px')};
     sheet.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{const k=b.dataset.copy,i=+k.slice(1),here=S.fromHere&&i===0;copyText(k[0]==='g'?googleLink(parts[i],here,r.avoid):appleLink(parts[i],here,r.avoid),b)});
     if($('f-note'))$('f-note').oninput=e=>{S.note=e.target.value};
     if($('b-share'))$('b-share').onclick=async e=>{const link=shareLink();
@@ -787,10 +832,10 @@ function render(){
   }
   else if(m==='viewer'){
     const v=S.viewer,parts=splitParts(v.o,v.d,v.s,{o:v.on,d:v.dn});
-    sheet.innerHTML=`<h2>${esc(v.n||'Shared route')}</h2>${v.t?`<p class="note">${esc(v.t)}</p>`:''}${v.on||v.dn?`<p class="hint">${v.on?`From <b>${esc(v.on)}</b>`:'From the green pin'} to ${v.dn?`<b>${esc(v.dn)}</b>`:'the red pin'}.</p>`:''}<p class="sub">Someone drew this route for you. Open it in your maps app and it will follow the orange line${v.s.length?` using ${v.s.length} in-between stop${v.s.length>1?'s':''}`:''}.</p>
+    sheet.innerHTML=`<h2>${esc(v.n||'Shared route')}</h2>${v.t?`<p class="note">${esc(v.t)}</p>`:''}${v.on||v.dn?`<p class="hint">${v.on?`From <b>${esc(v.on)}</b>`:'From the green pin'} to ${v.dn?`<b>${esc(v.dn)}</b>`:'the red pin'}.</p>`:''}<p class="sub">Someone drew this route for you. Open it in your maps app and it will follow the orange line.</p>
       ${linkBlocks({origin:v.o,dest:v.d,stops:v.s,avoid:!!v.aa,names:{o:v.on,d:v.dn}})}
       <label class="toggle"><input type="checkbox" id="t-here" ${S.fromHere?'checked':''}> Start from my current location</label>
-      <p class="hint">${v.s.length?'The app will announce each in-between stop. Just keep driving; if it pauses, tap Continue or Resume. ':''}Apple Maps links need iOS 18.4 or later.</p>
+      <p class="hint">${v.s.length?`On the way, the maps app will announce ${v.s.length===1?'a pass-through point':v.s.length+' pass-through points'} that keep${v.s.length===1?'s':''} it on the route. Just keep driving; if it pauses, tap Continue or Resume. `:''}Apple Maps links need iOS 18.4 or later.</p>
       <div class="row" style="margin-top:8px"><a class="btn small" href="${esc(location.href.split('#')[0])}">Draw your own route</a></div>`;
     $('t-here').onchange=e=>{S.fromHere=e.target.checked;render()};
     sheet.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{const k=b.dataset.copy,i=+k.slice(1),here=S.fromHere&&i===0;
@@ -814,7 +859,7 @@ function cleanShare(v){
 function openViewer(){
   try{const v=cleanShare(JSON.parse(b64u.dec(location.hash.slice(3))));S.viewer=v;S.mode='viewer';S.fromHere=false;
     const path=decPoly(v.p||'');if(path.length>1)L.polyline(path,{color:css('--drawn'),weight:7}).addTo(map);
-    let n=0;splitParts(v.o,v.d,v.s,{o:v.on,d:v.dn}).forEach((p,pi,arr)=>{p.w.forEach(w=>L.marker(w,{icon:pinIcon(++n,'fake'),interactive:false}).addTo(map));if(pi<arr.length-1)L.marker(p.d,{icon:pinIcon('⇥','split'),interactive:false}).addTo(map),n++});
+    let n=0;splitParts(v.o,v.d,v.s,{o:v.on,d:v.dn}).forEach((p,pi,arr)=>{p.w.forEach(w=>{++n;L.marker(w,{icon:pinIcon('','fake'),interactive:false}).addTo(map)});if(pi<arr.length-1)L.marker(p.d,{icon:pinIcon('⇥','split'),interactive:false}).addTo(map),n++});
     (v.z||[]).forEach(z=>{L.circle(z,{radius:40,color:css('--danger'),weight:2,fillOpacity:.22,interactive:false}).addTo(map);L.marker(z,{icon:pinIcon('✕','avoid'),interactive:false}).addTo(map)});
     L.marker(v.o,{icon:pinIcon('A','start')}).addTo(map);L.marker(v.d,{icon:pinIcon('B','end')}).addTo(map);
     render();fitRoute(path.length>1?path:[v.o,v.d]);return true}

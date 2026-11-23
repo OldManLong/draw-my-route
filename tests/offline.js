@@ -51,7 +51,7 @@ const FRAME_PARK = { name: 'Frame Park', category: 'leisure', display_name: 'Fra
 const houseAt = u => { const q = new URL(u).searchParams; return { lat: q.get('lat'), lon: q.get('lon'), category: 'building', name: '', address: { house_number: '101', road: 'West Main Street', city: 'Waukesha', state: 'Wisconsin', postcode: '53186' } }; };
 const bareRoadAt = u => { const q = new URL(u).searchParams; return { lat: q.get('lat'), lon: q.get('lon'), category: 'highway', name: 'County Road F', address: { road: 'County Road F', city: 'Waukesha', state: 'Wisconsin' } }; };
 
-function fakeServices({ osrm, valhalla, locate, roads, reverse, places } = {}) {
+function fakeServices({ osrm, valhalla, locate, roads, reverse, places, photon } = {}) {
   return route => {
     const u = route.request().url();
     if (u.includes('tile.openstreetmap.org')) return route.fulfill({ body: PNG, contentType: 'image/png' });
@@ -67,6 +67,7 @@ function fakeServices({ osrm, valhalla, locate, roads, reverse, places } = {}) {
       if (valhallaQuery(u).exclude_locations) return valhallaAnswer(route, aroundMarks(valhallaPts(u)));
       return valhalla ? valhalla(route, u) : valhallaAnswer(route, valhallaPts(u)); // by default the second engine agrees with the first
     }
+    if (u.includes('photon')) return photon ? photon(route, u) : route.abort(); // by default the typo-tolerant search is down, and the fallback answers
     if (u.includes('nominatim') && u.includes('/reverse')) return json(route, reverse ? reverse(u) : { error: 'Unable to geocode' }); // by default: no address known
     if (u.includes('nominatim')) return json(route, places ? places(u) : [FRAME_PARK]);
     return route.abort();
@@ -94,6 +95,25 @@ module.exports = async function offline(browser, url) {
     t.check(stamp.stamped(html) === html, 'index.html is out of date: run "node tools/stamp.js" after changing app.js, roads.js or leaflet.js');
     for (const f of stamp.FILES) t.check(html.includes(`<script src="${f}?v=${stamp.print(f)}"></script>`), f + ' has no current fingerprint');
     const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices() });
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Credits: OpenStreetMap is credited with a link on the map, and every service is named', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices() });
+    const onMap = await page.$$eval('.leaflet-control-attribution a', as => as.map(a => a.textContent + ' -> ' + a.href));
+    t.check(onMap.some(x => /OpenStreetMap -> https:\/\/www\.openstreetmap\.org\/copyright/.test(x)), 'the map does not credit OpenStreetMap with a link to its copyright page: ' + onMap.join(', '));
+    t.check((await page.textContent('.leaflet-control-attribution')).includes('© OpenStreetMap contributors'), 'the credit wording is wrong');
+    await page.click('#credits summary');
+    const words = await page.textContent('#credits');
+    for (const who of ['OpenStreetMap', 'Open Database Licence', 'OSRM', 'Valhalla', 'FOSSGIS', 'Photon', 'Nominatim', 'Overpass', 'Leaflet']) t.check(words.includes(who), who + ' is not credited');
+    t.check(/not connected with Google or Apple/.test(words), 'the site does not say it is unconnected with Google and Apple');
+    // the map's credit stays on screen while a route is drawn and on the result screen
+    await drawRoute(page, [A, MID, B]);
+    const seen = async () => page.evaluate(() => { const r = document.querySelector('.leaflet-control-attribution').getBoundingClientRect(), s = document.getElementById('sheet').getBoundingClientRect(); return r.height > 0 && r.bottom <= s.top + 1 && r.top >= 0; });
+    t.check(await seen(), 'the map credit is hidden behind the sheet while drawing');
+    await buildLinks(page); await page.waitForTimeout(400);
+    t.check(await seen(), 'the map credit is hidden on the result screen');
     t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
   });
@@ -193,6 +213,7 @@ module.exports = async function offline(browser, url) {
     };
     await record('few'); // the default: as few stops as possible
     for (const key of ['balanced', 'most']) {
+      if (!await page.isVisible(`[data-level="${key}"]`)) await page.click('#more summary');
       await page.click(`[data-level="${key}"]`);
       await page.waitForFunction(k => window.DMR.S.mode === 'result' && window.DMR.S.result.level === k, key, { timeout: 30000 });
       await record(key);
@@ -331,7 +352,7 @@ module.exports = async function offline(browser, url) {
     await v.goto(r.share); await v.waitForFunction(() => window.DMR && window.DMR.S.mode === 'viewer');
     t.check(await v.getAttribute('a.btn.google', 'href') === r.google[0], 'the shared link lost the place names');
     // "start from my current location": the start is left out and becomes a coordinate stop
-    await page.click('details.opts summary'); await page.check('#t-here');
+    await page.click('#more summary'); await page.check('#t-here');
     const here = new URL(await page.getAttribute('a.btn.google', 'href'));
     t.check(!here.searchParams.get('origin') && here.searchParams.get('waypoints').split('|').every(w => coord.test(w)), '"start from my location" link is wrong');
     t.check(errors.length === 0, errors.join('; '));
@@ -418,6 +439,66 @@ module.exports = async function offline(browser, url) {
     await page.click('#b-clear'); await page.waitForTimeout(300);
     await page.mouse.click(90, 220); await page.waitForTimeout(400); await page.mouse.click(300, 240); await page.waitForTimeout(500);
     t.check(await pins() === 2, 'taps no longer set the start and destination');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Search forgives misspellings: the typo-tolerant service is asked first, near the start, with a fallback', async t => {
+    const asked = { photon: [], nominatim: 0 };
+    const feat = (name, hn, street, city, lat, lon, key = 'amenity') => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { name, housenumber: hn, street, city, state: 'Wisconsin', postcode: '53186', osm_key: key } });
+    let down = false;
+    const photon = (route, u) => { const q = new URL(u).searchParams; asked.photon.push({ q: q.get('q'), lat: q.get('lat'), lon: q.get('lon') }); if (down) return route.abort();
+      return json(route, { features: [feat("Culver's", '1090', 'North Rochester Street', 'Mukwonago', 42.8786, -88.3394), feat("Culver's", '1650', 'East Main Street', 'Waukesha', 43.0227, -88.2018), { type: 'Feature', properties: { name: 'broken' } }] }); };
+    const places = () => { asked.nominatim++; return [FRAME_PARK]; };
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices({ photon, places }) });
+    await page.evaluate(() => window.DMR.setEnd('from', [43.0086, -88.2329], 'Waukesha Public Library', 'Waukesha Public Library, Waukesha, Wisconsin'));
+    await page.fill('#q-to', 'Culvers'); await page.waitForFunction(() => document.querySelectorAll('#results button').length === 2);
+    const shown = await page.$$eval('#results button', bs => bs.map(b => b.textContent));
+    t.note('typed "Culvers": ' + shown.join(' | '));
+    t.check(asked.photon.length === 1 && asked.photon[0].q === 'Culvers' && Math.abs(+asked.photon[0].lat - 43.0086) < 0.001 && Math.abs(+asked.photon[0].lon + 88.2329) < 0.001, 'the search was not sent to the typo-tolerant service with the start as its centre');
+    t.check(asked.nominatim === 0, 'the fallback was asked although the first service answered');
+    t.check(/Culver's/.test(shown[0]) && /East Main/.test(shown[0]) && /mi away/.test(shown[0]) && /Rochester/.test(shown[1]), 'results are not the right places, nearest first');
+    // a place whose name is what was typed beats a closer place that merely mentions it
+    const airport = (route, u) => { asked.photon.push({}); return json(route, { features: [feat('Waukesha County Crisis Resource Center', '1501', 'Airport Road', 'Waukesha', 43.0300, -88.2400), feat('Waukesha County Airport', undefined, undefined, 'Waukesha', 43.0396, -88.2349, 'aeroway')] }); };
+    const two = await openApp(browser, url, { mock: fakeServices({ photon: airport }) });
+    await two.page.evaluate(() => window.DMR.setEnd('from', [43.0086, -88.2329], 'Waukesha Public Library', 'Waukesha Public Library, Waukesha, Wisconsin'));
+    await two.page.fill('#q-to', 'waukesha county airport'); await two.page.waitForFunction(() => document.querySelectorAll('#results button').length === 2);
+    const first = await two.page.textContent('#results button');
+    t.check(/^Waukesha County Airport/.test(first), 'a closer place that only mentions the words came first: ' + first);
+    await two.ctx.close();
+    await page.click('#results button'); await page.waitForFunction(() => window.DMR.S.pts.length === 2);
+    t.check(await page.evaluate(() => window.DMR.S.toQ) === "Culver's, 1650 East Main Street, Waukesha, Wisconsin 53186", 'the chosen place is not sent as its name and address: ' + await page.evaluate(() => window.DMR.S.toQ));
+    // the typo-tolerant service is down: the other one answers
+    down = true;
+    await page.fill('#q-to', 'frame park'); await page.waitForFunction(() => [...document.querySelectorAll('#results button')].some(b => /Frame Park/.test(b.textContent)));
+    t.check(asked.nominatim >= 1, 'the fallback search was not used when the first service failed');
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  await S.test('Result screen: the route stays large on the map and the two buttons are in view without scrolling', async t => {
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices() });
+    await drawRoute(page, [A, MID, B]);
+    await buildLinks(page); await page.waitForTimeout(900);
+    const m = await page.evaluate(() => { const D = window.DMR, sheet = document.getElementById('sheet').getBoundingClientRect(), pts = D.S.sent.coords.map(c => D.map.latLngToContainerPoint(c));
+      const xs = pts.map(p => p.x), ys = pts.map(p => p.y), g = document.querySelector('a.btn.google').getBoundingClientRect(), a = document.querySelector('a.btn.apple').getBoundingClientRect();
+      return { vh: innerHeight, vw: innerWidth, sheetTop: sheet.top, topHidden: document.getElementById('top').hidden, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys), gBottom: g.bottom, aBottom: a.bottom, gTop: g.top, sameRow: Math.abs(g.top - a.top) < 4 }; });
+    t.note(`sheet covers ${Math.round(100 - m.sheetTop / m.vh * 100)}% of the screen; the route spans ${Math.round(m.x1 - m.x0)} of ${m.vw} px across`);
+    t.check(m.sheetTop >= m.vh * 0.52, `the sheet covers ${Math.round(100 - m.sheetTop / m.vh * 100)}% of the screen`);
+    t.check(m.topHidden, 'the From and To boxes still cover the map on the result screen');
+    t.check(m.y0 >= 0 && m.y1 <= m.sheetTop && m.x0 >= 0 && m.x1 <= m.vw, 'part of the route is hidden behind the sheet or off the screen');
+    t.check((m.x1 - m.x0) >= m.vw * 0.6 || (m.y1 - m.y0) >= m.sheetTop * 0.6, 'the route is drawn small: the map is zoomed out too far');
+    t.check(m.gTop >= m.sheetTop && m.gBottom <= m.vh && m.aBottom <= m.vh && m.sameRow, 'the Google and Apple buttons are not both in view, side by side');
+    // Stops are plumbing: the screen says the route is ready, and only mentions the mechanics under Details.
+    const front = await page.evaluate(() => { const c = document.getElementById('sheet').cloneNode(true); c.querySelectorAll('details').forEach(d => d.remove()); return { h2: c.querySelector('h2').textContent, text: c.textContent }; });
+    t.check(front.h2 === 'Your route is ready', 'the heading is about something other than the route being ready: ' + front.h2);
+    t.check(!/\bstops?\b/i.test(front.text), 'the front of the result screen talks about stops: ' + (front.text.match(/[^.]*\bstops?\b[^.]*/i) || [''])[0].trim());
+    t.check(/pass-through point/.test(front.text) && /Just keep driving/.test(front.text), 'the driver is not told about the announcements along the way');
+    t.check(await page.locator('#more').count() === 1 && !(await page.evaluate(() => document.getElementById('more').open)), 'the details are not folded away');
+    await page.screenshot({ path: path.join(OUT, 'offline-result.png') });
+    // going back to edit brings the From and To boxes back
+    await page.click('#b-edit');
+    t.check(await page.isVisible('#q-from') && await page.evaluate(() => !document.getElementById('sheet').classList.contains('compact')), 'editing did not bring the drawing screen back');
     t.check(errors.length === 0, errors.join('; '));
     await ctx.close();
   });

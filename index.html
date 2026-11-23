@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <!-- Only this site's own scripts may run, and the page may only talk to the map, routing, road-data and search services it uses. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self' https://router.project-osrm.org https://valhalla1.openstreetmap.de https://nominatim.openstreetmap.org https://overpass-api.de https://overpass.private.coffee; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self' https://router.project-osrm.org https://valhalla1.openstreetmap.de https://nominatim.openstreetmap.org https://photon.komoot.io https://overpass-api.de https://overpass.private.coffee; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="strict-origin">
 <title>Draw My Route</title>
 <meta name="description" content="Draw your own driving route, then open it in Google Maps or Apple Maps.">
@@ -739,6 +739,8 @@ button:focus-visible,input:focus-visible,a:focus-visible,summary:focus-visible{o
 #sheet{position:fixed;z-index:500;left:0;right:0;bottom:0;margin:0 auto;max-width:540px;max-height:62vh;overflow:auto;
   padding-top:16px;padding-bottom:calc(env(safe-area-inset-bottom,0px) + 16px);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
   border-radius:18px 18px 0 0;display:flex;flex-direction:column;gap:10px}
+#sheet.compact{max-height:46vh}
+#sheet a:not(.btn){color:var(--accent)}
 #sheet h2{margin:0;font-size:20px;line-height:1.2;text-wrap:balance}
 .sub{margin:0;color:var(--muted)}
 .hint{margin:0;font-size:13px;color:var(--muted)}
@@ -769,7 +771,7 @@ button:focus-visible,input:focus-visible,a:focus-visible,summary:focus-visible{o
 
 .pin{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font:700 12px/1 var(--ui);border:2.5px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.35)}
 .pin.start{background:var(--good)}.pin.end{background:var(--danger)}.pin.mid{background:var(--drawn)}
-.pin.fake{background:var(--fake);width:22px;height:22px;font-size:11px;margin:2px}
+.pin.fake{background:var(--fake);width:12px;height:12px;margin:7px;border-width:2px}
 .pin.split{background:var(--dark);color:var(--bg)}
 .pin.avoid{background:var(--danger);width:22px;height:22px;font-size:12px;margin:2px}
 .seg{display:flex;padding:3px;border-radius:11px;background:var(--chip);gap:3px}
@@ -778,6 +780,7 @@ button:focus-visible,input:focus-visible,a:focus-visible,summary:focus-visible{o
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
 .legend i{display:inline-block;width:18px;height:0;border-top:4px solid var(--drawn);vertical-align:middle;margin-right:5px;border-radius:2px}
 .legend i.pred{border-top:3px dashed var(--accent)}
+.legend i.dot{width:10px;height:10px;border:0;border-radius:50%;background:var(--fake)}
 .legend i.x{width:10px;height:10px;border:0;border-radius:50%;background:var(--danger)}
 .pop{display:flex;flex-direction:column;gap:8px;min-width:150px}
 .leaflet-popup-content-wrapper,.leaflet-popup-tip{background:var(--panel);color:var(--fg)}
@@ -798,6 +801,6 @@ button:focus-visible,input:focus-visible,a:focus-visible,summary:focus-visible{o
 
 <script src="leaflet.js?v=5a640ff863"></script>
 <script src="roads.js?v=ab1201f03a"></script>
-<script src="app.js?v=0f733871aa"></script>
+<script src="app.js?v=6fd133c3ff"></script>
 </body>
 </html>

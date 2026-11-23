@@ -65,22 +65,34 @@ The page calls these free public services straight from the visitor's browser:
   and Apple each route differently and stops that convince a single engine are fragile.
   The public Valhalla server takes at most 10 points per request, so long routes are checked in pieces.
 
-## Stops levels
+## How firmly the route is held
 
-The result screen has a three-way control for how firmly the route is pinned down:
+The in-between stops are plumbing: they are how Google and Apple are kept on the route. The result screen just says
+the route is ready; the mechanics sit under "Details and options", including a three-way control:
 
-- **Fewest stops** (default): one routing engine, stops only where the fastest route would leave the drawn one.
-- **Balanced**: two engines, plus a stop at least every 2 km so no long stretch is left to chance.
-- **Most reliable**: two engines, plus a stop at least every 700 m. Longer routes need several links (9 stops each).
+- **Lightest** (default): one routing engine, a pass-through point only where the fastest route would leave the drawn one.
+- **Balanced**: two engines, plus a point at least every 2 km so no long stretch is left to chance.
+- **Firmest**: two engines, plus a point at least every 700 m. Longer routes need several links (9 points each).
 
 The spacings were chosen by trying 2 km, 1.2 km and 700 m on the live test routes and scoring each with an outside engine.
 - Road data for smooth dragging: Overpass (`overpass-api.de`, then `overpass.private.coffee` if that fails)
-- Search: Nominatim
+- Search: Photon (forgiving of misspellings, favours places near the start), with Nominatim as fallback and for addresses
 
 They are fine for personal and light use but are rate-limited and come with no uptime promise.
 If the site gets real traffic, switch to a provider with a free tier meant for apps.
 
-Map data © OpenStreetMap contributors. Leaflet is included under its BSD 2-Clause licence (see `LEAFLET-LICENSE.txt`).
+## Credits
+
+- Map, road, place and address data: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors, under the
+  Open Database Licence. The credit is shown on the map on every screen, linked to that page, as the licence asks.
+- Map pictures: OpenStreetMap's tile servers. Routing: [OSRM](https://project-osrm.org/) and
+  [Valhalla](https://valhalla.github.io/valhalla/), on servers run by [FOSSGIS](https://www.fossgis.de/).
+  Place search: [Photon](https://photon.komoot.io/) by komoot, with [Nominatim](https://nominatim.org/) as fallback and
+  for address lookup. Road data: the [Overpass API](https://overpass-api.de/). All are named under "About and credits"
+  on the site's start screen.
+- [Leaflet](https://leafletjs.com/) is included under its BSD 2-Clause licence (see `LEAFLET-LICENSE.txt`).
+- The road data in `tests/fixtures/` is OpenStreetMap data too, under the same licence.
+- Draw My Route is not connected with Google or Apple; it only builds links that open in their maps apps.
 
 ## Privacy and security
 
