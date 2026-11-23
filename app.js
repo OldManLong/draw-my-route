@@ -687,23 +687,32 @@ function searchNear(){
   if(map.getZoom()>=9){const c=map.getCenter();return [c.lat,c.lng]}
   return null;
 }
-const SEARCH_REACH=0.9;                                   // degrees of latitude either side of that point: about 100 km
+/* The search service returns its few "most important" matches in an area, not the nearest ones, so a wide area crowds out
+   what is close. So: a tight area round that point first, a wide one only if that finds little, anywhere only if both
+   find nothing. Degrees of latitude either side: about 17 km, then about 100 km. */
+const SEARCH_REACH=[0.15,0.9],SEARCH_ENOUGH=4;
+let searchSeq=0;
 async function search(q){
   if(!q)return;
   if(DEMO){const v=q.toLowerCase();showHits(DEMO.places.filter(p=>(p.name+' '+(p.sub||'')).toLowerCase().includes(v)));return}
-  const near=searchNear(),base=`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&q=${encodeURIComponent(q)}`;
+  const seq=++searchSeq,near=searchNear(),base=`https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=8&q=${encodeURIComponent(q)}`;
+  const ask=async url=>{const j=await (await fetch(url)).json();return Array.isArray(j)?j:[]};
   try{
-    let j=[];
-    if(near){const dLon=SEARCH_REACH/Math.cos(near[0]*Math.PI/180);
-      const box=`&viewbox=${(near[1]-dLon).toFixed(4)},${(near[0]+SEARCH_REACH).toFixed(4)},${(near[1]+dLon).toFixed(4)},${(near[0]-SEARCH_REACH).toFixed(4)}`;
-      j=await (await fetch(base+box+'&bounded=1')).json();              // only places in that area...
-      if(!Array.isArray(j)||!j.length)j=await (await fetch(base+box)).json()}   // ...and if there are none, anywhere, nearer ones favoured
-    else j=await (await fetch(base)).json();
-    const hits=(Array.isArray(j)?j:[]).map(p=>{const parts=p.display_name.split(', '),t=placeText(p),ll=[+p.lat,+p.lon],d=near?hav(near,ll):null;
+    let found=[];const seen=new Set(),add=list=>{for(const p of list){const k=p.place_id||p.lat+','+p.lon;if(!seen.has(k)){seen.add(k);found.push(p)}}};
+    if(near){
+      let box='';
+      for(const reach of SEARCH_REACH){const dLon=reach/Math.cos(near[0]*Math.PI/180);
+        box=`&viewbox=${(near[1]-dLon).toFixed(4)},${(near[0]+reach).toFixed(4)},${(near[1]+dLon).toFixed(4)},${(near[0]-reach).toFixed(4)}`;
+        add(await ask(base+box+'&bounded=1'));
+        if(seq!==searchSeq)return;                                       // the visitor has typed on: drop this search
+        if(found.length>=SEARCH_ENOUGH)break}
+      if(!found.length){add(await ask(base+box));if(seq!==searchSeq)return}
+    }else{add(await ask(base));if(seq!==searchSeq)return}
+    const hits=found.map(p=>{const parts=p.display_name.split(', '),t=placeText(p),ll=[+p.lat,+p.lon],d=near?hav(near,ll):null;
       return {name:t.label||parts[0],sub:(d===null?'':fmtDist(d)+' away · ')+parts.slice(1,4).join(', '),ll,q:t.q,d}});
     if(near)hits.sort((a,b)=>a.d-b.d);                                   // nearest first
     showHits(hits)}
-  catch(e){toast('Search is unavailable right now.')}
+  catch(e){if(seq===searchSeq)toast('Search is unavailable right now.')}
 }
 
 /* ---------------- Sheet ---------------- */

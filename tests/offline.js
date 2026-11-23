@@ -439,7 +439,8 @@ module.exports = async function offline(browser, url) {
     await page.fill('#q-to', 'target'); await page.waitForFunction(() => document.querySelectorAll('#results button').length === 2);
     const box = asked[0].viewbox.split(',').map(Number);
     t.note('search area: ' + asked[0].viewbox);
-    t.check(asked[0].bounded === '1' && box[0] < -88.2329 && box[2] > -88.2329 && box[3] < 43.0086 && box[1] > 43.0086 && box[1] - box[3] < 2.5, 'the search area is not a box round the start');
+    t.check(asked[0].bounded === '1' && box[0] < -88.2329 && box[2] > -88.2329 && box[3] < 43.0086 && box[1] > 43.0086 && box[1] - box[3] < 0.5, 'the first search area is not a tight box round the start');
+    t.check(asked.length === 2 && asked[1].bounded === '1' && asked[1].viewbox !== asked[0].viewbox, 'with only two matches close by, the search should have widened once');
     const shown = await page.$$eval('#results button', bs => bs.map(b => b.textContent));
     t.note('shown: ' + shown.join(' | '));
     t.check(/Sunset/.test(shown[0]) && /Kossow/.test(shown[1]), 'results are not nearest first');
@@ -447,7 +448,7 @@ module.exports = async function offline(browser, url) {
     // nothing nearby: fall back to anywhere, still nearest first
     nearbyEmpty = true; asked.length = 0;
     await page.fill('#q-to', 'target store'); await page.waitForFunction(() => document.querySelectorAll('#results button').length === 3);
-    t.check(asked.length === 2 && asked[0].bounded === '1' && !asked[1].bounded && !!asked[1].viewbox, 'did not fall back to a wider search when nothing was nearby');
+    t.check(asked.length === 3 && asked[0].bounded === '1' && asked[1].bounded === '1' && !asked[2].bounded && !!asked[2].viewbox, 'did not fall back to searching anywhere when nothing was nearby');
     const wide = await page.$$eval('#results button', bs => bs.map(b => b.textContent));
     t.check(/Sunset/.test(wide[0]) && /Minneapolis/.test(wide[2]), 'the wider results are not nearest first');
     t.check(errors.length === 0, errors.join('; '));
