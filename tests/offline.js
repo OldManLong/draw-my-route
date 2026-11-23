@@ -88,6 +88,16 @@ module.exports = async function offline(browser, url) {
     await ctx.close();
   });
 
+  await S.test('The page loads exactly the code it was published with (script addresses carry current fingerprints)', async t => {
+    const fs = require('fs'), stamp = require('../tools/stamp');
+    const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+    t.check(stamp.stamped(html) === html, 'index.html is out of date: run "node tools/stamp.js" after changing app.js, roads.js or leaflet.js');
+    for (const f of stamp.FILES) t.check(html.includes(`<script src="${f}?v=${stamp.print(f)}"></script>`), f + ' has no current fingerprint');
+    const { ctx, page, errors } = await openApp(browser, url, { mock: fakeServices() });
+    t.check(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
   await S.test('Home-screen setup: manifest, icons and app title are present', async t => {
     const { ctx, page } = await openApp(browser, url, { mock: fakeServices() });
     const info = await page.evaluate(async () => {

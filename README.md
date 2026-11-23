@@ -41,6 +41,12 @@ It is a static site: there is no server and no build step. Everything runs in th
 3. Under "Build and deployment", choose "Deploy from a branch", pick `main` and `/ (root)`, and save.
 4. After a minute the site is live at `https://<your-username>.github.io/<repository-name>/`.
 
+## Changing the code
+
+After editing `app.js`, `roads.js` or `leaflet.js`, run `node tools/stamp.js` before publishing. It updates the
+fingerprints on the script addresses in `index.html`, so a visitor's browser never pairs a new page with old code.
+The tests fail if this step was missed.
+
 ## Add it to a phone's home screen
 
 - iPhone: open the site in Safari, tap Share, then "Add to Home Screen".
