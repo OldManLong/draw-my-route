@@ -6,7 +6,7 @@ const DEMO = window.DMR_DEMO || null;          // embedded Waukesha map + road g
 /* How hard to pin the route down. More stops = more reliable, but more "arriving at stop" announcements.
    second: also check the stops against a second routing engine. maxGap: longest stretch (metres) allowed without a stop. */
 const LEVELS = {
-  few:      {label:'Lightest',      second:false, maxGap:0,        note:'Lightest: a pass-through point only where the fastest route would leave yours. Fewest announcements.'},
+  few:      {label:'Lightest',      second:false, maxGap:0,        note:'Lightest: a pass-through point only where the fastest route, or another way a maps app might choose, would leave yours. Fewest announcements.'},
   balanced: {label:'Balanced',      second:true,  maxGap:2000,  note:'Balanced: checked against two routing engines, with a pass-through point at least every 2 km (1.2 mi).'},
   most:     {label:'Firmest',       second:true,  maxGap:700,  note:'Firmest: checked against two routing engines, with a pass-through point at least every 700 m (0.4 mi). Expect frequent announcements.'},
 };
@@ -97,6 +97,12 @@ function loopsIn(c){
   return out;
 }
 const WEAVE_MIN=100,WEAVE_MAX=400,WEAVE_SAME=1200,WEAVE_FAST=20;   // metres, metres, metres; metres a second: only on fast roads
+/* Other ways the usual engine would consider between two places (not the one it picks). */
+async function osrmAlternatives(a,b){
+  const wait=lastCall+350-Date.now();if(wait>0)await sleep(wait);lastCall=Date.now();
+  const j=await getJSON(`https://router.project-osrm.org/route/v1/driving/${a[1].toFixed(6)},${a[0].toFixed(6)};${b[1].toFixed(6)},${b[0].toFixed(6)}?overview=full&geometries=geojson&alternatives=3`);
+  return j.code==='Ok'?j.routes.slice(1).map(r=>r.geometry.coordinates.map(c=>[c[1],c[0]])):[];
+}
 async function osrmRoute(pts){
   const wait=lastCall+350-Date.now();if(wait>0)await sleep(wait);lastCall=Date.now();
   const s=pts.map(p=>p[1].toFixed(6)+','+p[0].toFixed(6)).join(';');
@@ -211,6 +217,7 @@ const route = DEMO ? makeLocalRouter(DEMO.graph) : (pts,opt)=>opt&&opt.avoid?val
    until it follows your route the whole way.
    With opts.second (a second, independent router) the stops must hold your route in BOTH routers:
    Google and Apple each make their own choices, so stops that only convince one router are fragile. */
+const RIVAL_MIN=1500,RIVAL_TOL=60;                    // metres apart for this long: a different way; metres: how close counts as the same road
 async function findStops(desiredLL, opts, onProgress){
   setRef(desiredLL[0]);
   const D=resample(desiredLL.map(P),10),Dix=indexLine(D.pts);
@@ -292,7 +299,20 @@ async function findStops(desiredLL, opts, onProgress){
       let i0=D.along.findIndex(a=>a>=m-w),i1=D.along.findIndex(a=>a>=m+w);if(i0<0)continue;if(i1<0)i1=D.pts.length-1;
       addStop(i0,i1);added++}
     return added};
+  /* Rivals: other reasonable ways from the start to the destination (another engine's choice, the usual engine's
+     alternatives). Google and Apple each choose for themselves, and on a long trip with several near-equal ways they
+     may well take one of these instead of the one the usual engine expects. So wherever your route runs RIVAL_MIN
+     metres or more apart from a rival, there must be a stop on that stretch of your route, whatever the prediction says. */
+  const rivalStops=()=>{if(avoidOnly)return 0;let added=0;
+    for(const rv of opts.rivals||[]){if(!rv||rv.length<2)continue;
+      const Rix=indexLine(resample(rv.map(P),40).pts,RIVAL_TOL),on=D.pts.map(p=>distToLine(Rix,p)<=RIVAL_TOL);
+      for(const [a,b] of stretches(on,D.along,RIVAL_MIN)){if(stops.length>=opts.maxStops)break;
+        if(stops.some(st=>st.i>=a&&st.i<=b))continue;
+        const third=Math.floor((b-a)/3);addStop(a+third,b-third);added++}}
+    return added};
   await converge();
+  // Where there were rivals to shut out, the engines plainly disagree here: have the second one check the result too.
+  if(rivalStops()){if(!opts.second&&opts.contested)routers.push({fn:opts.contested,min:0.97,second:true});await converge()}
   for(let round=0;round<3&&space();round++)await converge();        // spacing stops can need a little tidying themselves
   if(dirty||E.length<routers.length){onProgress&&onProgress(stops.length,routers.length>1);E=await evalAll(false)}
   const first=E.find(e=>!e.R.second),sec=E.find(e=>e.R.second)||null;
@@ -799,6 +819,11 @@ async function build(){
       catch(e){line=S.desired}                                         // server unreachable: send the phone's line as drawn
     }
     S.sent=line;
+    // Other ways a maps app might choose between the same two ends, asked of both engines. Any that cannot be had is left out.
+    if(!DEMO){const a=line.coords[0],z=line.coords[line.coords.length-1],el=$('prog');if(el)el.textContent='Looking for other ways a maps app might choose…';
+      base.rivals=[];base.contested=pts=>valhallaRoute(pts,false);
+      try{base.rivals.push((await valhallaRoute([a,z],false)).coords)}catch(e){}
+      try{base.rivals.push(...await osrmAlternatives(a,z))}catch(e){}}
     const res=await findStops(line.coords,base,prog('Google and Apple: '));
     const pick=res;
     pick.same=line===S.desired?1:lineMatch(S.desired.coords,line.coords);   // how much of the shaped line the sent line shares
