@@ -217,7 +217,8 @@ const route = DEMO ? makeLocalRouter(DEMO.graph) : (pts,opt)=>opt&&opt.avoid?val
    until it follows your route the whole way.
    With opts.second (a second, independent router) the stops must hold your route in BOTH routers:
    Google and Apple each make their own choices, so stops that only convince one router are fragile. */
-const RIVAL_MIN=1500,RIVAL_TOL=60;                    // metres apart for this long: a different way; metres: how close counts as the same road
+const RIVAL_MIN=1500,RIVAL_TOL=60,RIVAL_SHARE=0.04,CONTESTED_MIN=0.9;   // RIVAL_SHARE: and at least this share of the trip (a few miles of other roads on a day's drive is not worth a stop); CONTESTED_MIN: share of the route the second engine must follow on the lightest setting
+//                   // metres apart for this long: a different way; metres: how close counts as the same road
 async function findStops(desiredLL, opts, onProgress){
   setRef(desiredLL[0]);
   const D=resample(desiredLL.map(P),10),Dix=indexLine(D.pts);
@@ -303,17 +304,32 @@ async function findStops(desiredLL, opts, onProgress){
      alternatives). Google and Apple each choose for themselves, and on a long trip with several near-equal ways they
      may well take one of these instead of the one the usual engine expects. So wherever your route runs RIVAL_MIN
      metres or more apart from a rival, there must be a stop on that stretch of your route, whatever the prediction says. */
-  const rivalStops=()=>{if(avoidOnly)return 0;let added=0;
-    for(const rv of opts.rivals||[]){if(!rv||rv.length<2)continue;
-      const Rix=indexLine(resample(rv.map(P),40).pts,RIVAL_TOL),on=D.pts.map(p=>distToLine(Rix,p)<=RIVAL_TOL);
-      for(const [a,b] of stretches(on,D.along,RIVAL_MIN)){if(stops.length>=opts.maxStops)break;
-        if(stops.some(st=>st.i>=a&&st.i<=b))continue;
-        const third=Math.floor((b-a)/3);addStop(a+third,b-third);added++}}
-    return added};
+  // The stretches are gathered from every rival first, and one stop is put where several overlap, so that one stop
+  // shuts out as many rivals as it can (fewest stops that put a stop in every stretch).
+  const rivalGaps=[];
+  if(!avoidOnly)for(const rv of opts.rivals||[]){if(!rv||rv.length<2)continue;
+    const Rix=indexLine(resample(rv.map(P),40).pts,RIVAL_TOL),on=D.pts.map(p=>distToLine(Rix,p)<=RIVAL_TOL);
+    for(const g of stretches(on,D.along,Math.max(RIVAL_MIN,RIVAL_SHARE*D.len)))rivalGaps.push(g)}
+  const hit=g=>stops.some(st=>st.i>=g[0]&&st.i<=g[1]),rivalsShut=()=>rivalGaps.every(hit);
+  const rivalStops=()=>{let added=0,lo=-1,hi=-1;
+    const put=()=>{if(lo<0||stops.length>=opts.maxStops)return;const third=Math.floor((hi-lo)/3);addStop(lo+third,hi-third);added++};
+    for(const g of rivalGaps.filter(g=>!hit(g)).sort((x,y)=>x[1]-y[1])){
+      if(lo>=0&&g[0]<=hi){lo=Math.max(lo,g[0]);hi=Math.min(hi,g[1])}else{put();lo=g[0];hi=g[1]}}
+    put();return added};
   await converge();
   // Where there were rivals to shut out, the engines plainly disagree here: have the second one check the result too.
-  if(rivalStops()){if(!opts.second&&opts.contested)routers.push({fn:opts.contested,min:0.97,second:true});await converge()}
+  if(rivalStops()){if(!opts.second&&opts.contested)routers.push({fn:opts.contested,min:CONTESTED_MIN,second:true});await converge()}
   for(let round=0;round<3&&space();round++)await converge();        // spacing stops can need a little tidying themselves
+  /* Fewest stops: every stop is a false announcement on the drive, so each is tried without. A stop goes if every
+     rival stretch still has one and every engine still follows the route without it. (Not the evenly spaced ones a
+     firmer setting asks for.) */
+  if(!opts.maxGap&&!avoidOnly&&stops.length){
+    if(dirty||E.length<routers.length)E=await evalAll(false);
+    if(E.every(e=>e.ok))for(const st of stops.slice()){
+      const at=stops.indexOf(st);stops.splice(at,1);
+      let ok=rivalsShut();
+      if(ok){onProgress&&onProgress(stops.length,routers.length>1);const T=await evalAll(false);ok=T.length===routers.length&&T.every(e=>e.ok);if(ok)E=T}
+      if(!ok){stops.splice(at,0,st);dirty=true}}}
   if(dirty||E.length<routers.length){onProgress&&onProgress(stops.length,routers.length>1);E=await evalAll(false)}
   const first=E.find(e=>!e.R.second),sec=E.find(e=>e.R.second)||null;
   const crossedBy=e=>Z.filter(z=>e.C.pts.some(p=>hyp(p,z.p)<=ZR)).length;
